@@ -1,0 +1,25 @@
+# Python / 가상환경
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 로컬 환경변수 / 데이터
+.env
+.env.*
+!.env.example
+instance/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# 도구 / IDE / OS
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
