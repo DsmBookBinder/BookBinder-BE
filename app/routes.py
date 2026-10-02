@@ -5,7 +5,7 @@ api = Blueprint("api", __name__)
 
 @api.get("/")
 def index():
-    return {"message": "BookBinder 백엔드에 오신 것을 환영합니다!"}
+    return {"message": "프로젝트 초기 세팅"}
 
 
 @api.get("/api/health")
