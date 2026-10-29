@@ -8,6 +8,7 @@ class Config:
 
     def __init__(self):
         self.SECRET_KEY = os.getenv("SECRET_KEY")
+        self.SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "false").lower() == "true"
         self.SQLALCHEMY_DATABASE_URI = URL.create(
             "mysql+pymysql",
             host=os.getenv("DB_HOST", "localhost"),

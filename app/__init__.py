@@ -16,6 +16,14 @@ def create_app():
 
     from app.routes import api
 
+    from app.books.routes import books_api
+    from app.requests.routes import requests_api
+    from app.auth.routes import api as auth_api, resolve_session
+
     db.init_app(app)
+    app.before_request(resolve_session)
+    app.register_blueprint(auth_api)
     app.register_blueprint(api)
+    app.register_blueprint(books_api)
+    app.register_blueprint(requests_api)
     return app
