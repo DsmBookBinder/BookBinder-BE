@@ -63,6 +63,16 @@ def source_error(exc):
     return error('BOOK_PROVIDER_UNAVAILABLE', '도서 제공처를 사용할 수 없습니다.', 503)
 
 
+def has_purchased_request(book_id):
+    # Locking read sees committed state under MySQL REPEATABLE READ as well.
+    return db.session.execute(
+        select(BookRequest.id).where(
+            BookRequest.requested_book_id == book_id,
+            BookRequest.status == 'PURCHASED',
+        ).limit(1).with_for_update()
+    ).scalar_one_or_none() is not None
+
+
 @requests_api.post('/requests')
 def create_request():
     denied = authorize(student=True, csrf=True)
@@ -102,7 +112,7 @@ def create_request():
             book = RequestedBook(isbn=isbn, title=info['title'], author=info['author'], publisher=info['publisher'], price=price, cover_url=info.get('cover_url'))
             db.session.add(book)
             db.session.flush()
-        if book.status in ('rejected', 'purchased'):
+        if book.status in ('rejected', 'purchased') or has_purchased_request(book.id):
             db.session.rollback()
             return error('STATE_CONFLICT', '신청할 수 없는 도서입니다.', 409)
         item = BookRequest(user_id=field(user(), 'id'), book=book, price=price)
@@ -119,7 +129,7 @@ def create_request():
             book = db.session.execute(select(RequestedBook).where(RequestedBook.isbn == isbn).with_for_update()).scalar_one_or_none()
             if book is None:
                 raise RuntimeError('Concurrent book row unavailable')
-            if book.status in ('rejected', 'purchased'):
+            if book.status in ('rejected', 'purchased') or has_purchased_request(book.id):
                 db.session.rollback()
                 return error('STATE_CONFLICT', '신청할 수 없는 도서입니다.', 409)
             item = BookRequest(user_id=field(user(), 'id'), book=book, price=price)
