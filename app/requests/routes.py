@@ -49,9 +49,9 @@ def timestamp(value):
 def request_item(item):
     book = item.book
     return {'id': str(item.id), 'isbn': book.isbn, 'title': book.title,
-            'author': book.author, 'publisher': book.publisher, 'price': book.price,
-            'status': book.status.upper(), 'reject_reason': book.reject_reason,
-            'processed_at': timestamp(book.updated_at) if book.status != 'pending' else None,
+            'author': book.author, 'publisher': book.publisher, 'price': item.price,
+            'status': item.status, 'reject_reason': item.reject_reason,
+            'processed_at': timestamp(item.processed_at),
             'requested_at': timestamp(item.requested_at)}
 
 
@@ -105,7 +105,7 @@ def create_request():
         if book.status in ('rejected', 'purchased'):
             db.session.rollback()
             return error('STATE_CONFLICT', '신청할 수 없는 도서입니다.', 409)
-        item = BookRequest(user_id=field(user(), 'id'), book=book)
+        item = BookRequest(user_id=field(user(), 'id'), book=book, price=price)
         db.session.add(item)
         db.session.flush()
         response = request_item(item)
@@ -122,7 +122,7 @@ def create_request():
             if book.status in ('rejected', 'purchased'):
                 db.session.rollback()
                 return error('STATE_CONFLICT', '신청할 수 없는 도서입니다.', 409)
-            item = BookRequest(user_id=field(user(), 'id'), book=book)
+            item = BookRequest(user_id=field(user(), 'id'), book=book, price=price)
             db.session.add(item)
             db.session.flush()
             response = request_item(item)
@@ -149,7 +149,7 @@ def list_requests():
     if status and status not in ('PENDING', 'APPROVED', 'REJECTED', 'PURCHASED'):
         return error('VALIDATION_ERROR', '상태를 확인해 주세요.', 400)
     query = select(BookRequest).join(RequestedBook).where(BookRequest.user_id == field(user(), 'id'))
-    if status: query = query.where(RequestedBook.status == status.lower())
+    if status: query = query.where(BookRequest.status == status)
     total = db.session.scalar(select(func.count()).select_from(query.subquery()))
     items = db.session.execute(query.order_by(BookRequest.requested_at.desc(), BookRequest.id.desc()).offset((page-1)*size).limit(size)).scalars().all()
     return {'items': [request_item(item) for item in items], 'page': page, 'page_size': size, 'total': total}
