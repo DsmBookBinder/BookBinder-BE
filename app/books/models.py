@@ -11,7 +11,7 @@ def utcnow():
 class RequestedBook(db.Model):
     __tablename__ = 'requested_books'
     id = db.Column(db.BigInteger().with_variant(db.Integer, 'sqlite'), primary_key=True)
-    isbn = db.Column(db.String(13), nullable=False, unique=True)
+    isbn = db.Column(db.String(13), nullable=True, unique=True)
     title = db.Column(db.String(200), nullable=False)
     author = db.Column(db.String(100), nullable=False)
     publisher = db.Column(db.String(100), nullable=False)
@@ -32,8 +32,17 @@ class BookRequest(db.Model):
     user_id = db.Column(db.BigInteger, db.ForeignKey('users.id'), nullable=False, index=True)
     requested_book_id = db.Column(db.BigInteger, db.ForeignKey('requested_books.id'), nullable=False, index=True)
     requested_at = db.Column(db.DateTime, nullable=False, default=utcnow)
+    # Request-level state and price snapshot are authoritative for admin/student APIs.
+    price = db.Column(db.Integer, nullable=True)
+    status = db.Column(db.String(16), nullable=False, default='PENDING')
+    reject_reason = db.Column(db.String(500))
+    processed_by = db.Column(db.BigInteger, db.ForeignKey('users.id'), index=True)
+    processed_at = db.Column(db.DateTime)
     book = db.relationship(RequestedBook)
-    __table_args__ = (UniqueConstraint('user_id', 'requested_book_id', name='uq_request_user_book'),)
+    user = db.relationship('User', foreign_keys=[user_id])
+    __table_args__ = (UniqueConstraint('user_id', 'requested_book_id', name='uq_request_user_book'),
+                      CheckConstraint('price IS NULL OR price >= 0', name='ck_request_price'),
+                      CheckConstraint("status IN ('PENDING','APPROVED','REJECTED','PURCHASED')", name='ck_request_status'))
 
 
 class Notification(db.Model):
