@@ -28,6 +28,10 @@ class AuthTests(unittest.TestCase):
         self.assertEqual(self.client.post('/api/auth/signup', json=body).status_code, 403)
         csrf = self.token()
         self.assertEqual(self.client.post('/api/auth/signup', json=body, headers={'X-CSRF-Token': csrf}).status_code, 201)
+        for invalid in ('1041', '104100', '104100000', '1041a', '１０４１０', 10410, None, ' 10410'):
+            response = self.client.post('/api/auth/signup', json={**body, 'student_no': invalid}, headers={'X-CSRF-Token': csrf})
+            self.assertEqual(response.status_code, 400)
+            self.assertIn('student_no', response.get_json()['error']['fields'])
         self.assertNotIn('testpassword123', db.session.query(User).one().password_hash)
         self.assertEqual(self.client.post('/api/auth/signup', json=body, headers={'X-CSRF-Token': csrf}).status_code, 409)
         self.assertEqual(self.client.post('/api/auth/login', json={'login_id':'student01', 'password':'bad'}, headers={'X-CSRF-Token':csrf}).status_code, 401)
@@ -36,13 +40,17 @@ class AuthTests(unittest.TestCase):
         self.assertEqual(self.client.patch('/api/me', json={'name':'새 이름'}, headers={'X-CSRF-Token':csrf}).status_code, 403)
         csrf = self.token()
         self.assertEqual(self.client.patch('/api/me', json={'name':'새 이름'}, headers={'X-CSRF-Token':csrf}).get_json()['name'], '새 이름')
+        for number, status in [('104100000', 400), ('1041a', 400), ('00410', 200)]:
+            response = self.client.patch('/api/me', json={'student_no': number}, headers={'X-CSRF-Token': csrf})
+            self.assertEqual(response.status_code, status)
+            self.assertEqual(self.client.get('/api/me').get_json()['student_no'], number if status == 200 else '20301')
         self.assertEqual(self.client.patch('/api/me', json={'role':'librarian'}, headers={'X-CSRF-Token':csrf}).status_code, 400)
         self.assertEqual(self.client.post('/api/auth/logout', headers={'X-CSRF-Token':csrf}).status_code, 204)
         self.assertEqual(self.client.get('/api/me').status_code, 401)
 
     def test_signup_cannot_choose_role(self):
         csrf = self.token()
-        body = {'login_id':'abcde','password':'1234567890','name':'학생','grade_class':'1-1','student_no':'1','role':'librarian'}
+        body = {'login_id':'abcde','password':'1234567890','name':'학생','grade_class':'1-1','student_no':'10410','role':'librarian'}
         self.assertEqual(self.client.post('/api/auth/signup', json=body, headers={'X-CSRF-Token':csrf}).status_code, 400)
 
 

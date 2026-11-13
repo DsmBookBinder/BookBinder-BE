@@ -63,6 +63,13 @@ def valid_text(value, maximum):
     return isinstance(value, str) and 1 <= len(value.strip()) <= maximum
 
 
+def student_number_error(value):
+    if isinstance(value, str) and re.fullmatch(r'[0-9]{5}', value):
+        return None
+    message = '학번은 숫자 5자리로 입력해 주세요.'
+    return {'error': {'code': 'VALIDATION_ERROR', 'message': message, 'fields': {'student_no': message}}}, 400
+
+
 @api.get('/auth/csrf')
 def csrf_token():
     if g.auth_session:
@@ -85,9 +92,12 @@ def signup():
     data = request.get_json(silent=True)
     if not isinstance(data, dict) or set(data) != {'login_id', 'password', 'name', 'grade_class', 'student_no'}:
         return error('VALIDATION_ERROR', '가입 정보를 확인해 주세요.', 400)
+    invalid = student_number_error(data['student_no'])
+    if invalid:
+        return invalid
     login = data['login_id']
     password = data['password']
-    if not isinstance(login, str) or not re.fullmatch(r'[A-Za-z0-9_]{4,50}', login) or not isinstance(password, str) or not 10 <= len(password) <= 128 or not valid_text(data['name'], 50) or not valid_text(data['grade_class'], 20) or not valid_text(data['student_no'], 20):
+    if not isinstance(login, str) or not re.fullmatch(r'[A-Za-z0-9]{4,20}', login) or not isinstance(password, str) or not 8 <= len(password) <= 128 or not valid_text(data['name'], 50) or not valid_text(data['grade_class'], 20):
         return error('VALIDATION_ERROR', '가입 정보를 확인해 주세요.', 400)
     account = User(login_id=login.lower(), password_hash=generate_password_hash(password), name=data['name'].strip(), role='student', grade_class=data['grade_class'].strip(), student_no=data['student_no'].strip())
     try:
@@ -137,8 +147,14 @@ def me():
         denied = csrf_required()
         if denied: return denied
         data = request.get_json(silent=True)
-        if not isinstance(data, dict) or not data or not set(data) <= {'name', 'grade_class'} or ('name' in data and not valid_text(data['name'], 50)) or ('grade_class' in data and (g.current_user.role != 'student' or not valid_text(data['grade_class'], 20))):
+        if not isinstance(data, dict) or not data or not set(data) <= {'name', 'grade_class', 'student_no'} or ('name' in data and not valid_text(data['name'], 50)) or ('grade_class' in data and (g.current_user.role != 'student' or not valid_text(data['grade_class'], 20))):
             return error('VALIDATION_ERROR', '수정 정보를 확인해 주세요.', 400)
+        if 'student_no' in data:
+            if g.current_user.role != 'student':
+                return error('VALIDATION_ERROR', '학생 계정만 학번을 수정할 수 있습니다.', 400)
+            invalid = student_number_error(data['student_no'])
+            if invalid:
+                return invalid
         for key, value in data.items(): setattr(g.current_user, key, value.strip())
         db.session.commit()
     return private(g.current_user)
