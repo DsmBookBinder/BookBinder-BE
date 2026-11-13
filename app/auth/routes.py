@@ -1,3 +1,4 @@
+import click
 import hashlib
 import hmac
 import re
@@ -158,3 +159,23 @@ def me():
         for key, value in data.items(): setattr(g.current_user, key, value.strip())
         db.session.commit()
     return private(g.current_user)
+
+
+@api.cli.command('create-librarian')
+@click.argument('login_id')
+@click.option('--name', required=True)
+def create_librarian(login_id, name):
+    if not re.fullmatch(r'[A-Za-z0-9]{4,20}', login_id) or not valid_text(name, 50):
+        raise click.ClickException('아이디 또는 이름을 확인해 주세요.')
+    password = click.prompt('비밀번호', hide_input=True, confirmation_prompt=True)
+    if not 8 <= len(password) <= 128:
+        raise click.ClickException('비밀번호는 8~128자로 입력해 주세요.')
+    account = User(login_id=login_id.lower(), name=name.strip(), role='librarian',
+                   password_hash=generate_password_hash(password))
+    db.session.add(account)
+    try:
+        db.session.commit()
+    except IntegrityError as exc:
+        db.session.rollback()
+        raise click.ClickException('계정을 발급할 수 없습니다. 아이디 중복을 확인해 주세요.') from exc
+    click.echo('사서 계정을 발급했습니다.')

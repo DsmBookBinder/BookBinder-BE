@@ -48,6 +48,16 @@ class AuthTests(unittest.TestCase):
         self.assertEqual(self.client.post('/api/auth/logout', headers={'X-CSRF-Token':csrf}).status_code, 204)
         self.assertEqual(self.client.get('/api/me').status_code, 401)
 
+    def test_operator_creates_librarian(self):
+        args = ['auth', 'create-librarian', 'Library01', '--name', '사서']
+        runner = self.app.test_cli_runner()
+        result = runner.invoke(args=args, input='testpass123\n' 'testpass123\n')
+        self.assertEqual(result.exit_code, 0, result.output)
+        user = db.session.query(User).one()
+        self.assertEqual((user.login_id, user.role), ('library01', 'librarian'))
+        self.assertNotIn('testpass123', result.output)
+        self.assertNotEqual(user.password_hash, 'testpass123')
+
     def test_signup_cannot_choose_role(self):
         csrf = self.token()
         body = {'login_id':'abcde','password':'1234567890','name':'학생','grade_class':'1-1','student_no':'10410','role':'librarian'}
