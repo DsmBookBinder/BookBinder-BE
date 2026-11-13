@@ -16,7 +16,7 @@
 
 ## DB와 관리자 연동
 
-`migrations/000_auth.sql`과 `001_book_requests.sql`은 새 MySQL 8 데이터베이스용 초안이다. 운영 DB 적용 전 백업·검토 및 실제 MySQL 검증이 필요하다. A의 관리자 상태 변경은 해당 `requested_books` 행을 잠그고 상태 변경, 해당 신청자별 notifications 생성, 변경 이력을 하나의 트랜잭션에서 처리해야 한다. 현재 관리자 처리와 알림 생성은 구현되지 않았다.
+`migrations/000_auth.sql`과 `001_book_requests.sql`은 새 MySQL 8 데이터베이스용 초안이다. 운영 DB 적용 전 백업·검토 및 실제 MySQL 검증이 필요하다. 관리자 API는 사용자가 제공한 신청 단위 명세에 맞춰 구현되었다. `002_admin_request_state.sql`을 추가 적용하며, `book_requests`의 조건부 상태 갱신과 해당 신청자 알림 생성을 같은 트랜잭션으로 처리한다. 신청 당시 가격 및 신청별 상태 전환, 기존 데이터 제한은 `docs/admin-implementation.md`를 참고한다.
 
 Notion API 명세의 snake_case 및 items 구조를 임시로 사용한다. 기존 개발 규칙 초안의 camelCase/공통 응답 포장과 충돌하므로 FE 연동 전 A와 최종 계약을 확정해야 한다. 모의 공급자 테스트는 실제 공급자나 MySQL 검증을 대체하지 않는다.
 

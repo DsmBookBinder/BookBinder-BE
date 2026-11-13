@@ -1,4 +1,6 @@
 import unittest
+from unittest.mock import patch
+from sqlalchemy.exc import IntegrityError
 from flask import Flask, g
 from app.db import db
 from app.auth.models import User
@@ -53,6 +55,40 @@ class RequestsTests(unittest.TestCase):
         self.assertEqual(self.client.get('/api/me/requests').get_json()['total'], 0)
         self.assertEqual(self.create().status_code, 201)
         self.assertEqual(db.session.query(RequestedBook).count(), 1)
+
+    def purchased_request(self):
+        self.assertEqual(self.create().status_code, 201)
+        db.session.query(BookRequest).one().status = 'PURCHASED'
+        db.session.commit()
+        # The catalog and legacy book status still say it is requestable.
+        self.assertEqual(db.session.query(RequestedBook).one().status, 'pending')
+        self.uid = 2
+
+    def test_purchased_request_blocks_another_student(self):
+        self.purchased_request()
+        response = self.create()
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()['error']['code'], 'STATE_CONFLICT')
+        self.assertEqual(db.session.query(BookRequest).count(), 1)
+
+    def test_purchased_request_blocks_retry(self):
+        self.purchased_request()
+        execute = db.session.execute
+        calls = 0
+
+        def first_attempt_conflicts(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise IntegrityError('simulated concurrent insert', {}, Exception('conflict'))
+            return execute(*args, **kwargs)
+
+        with patch.object(db.session, 'execute', side_effect=first_attempt_conflicts):
+            response = self.create()
+        self.assertGreaterEqual(calls, 2)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()['error']['code'], 'STATE_CONFLICT')
+        self.assertEqual(db.session.query(BookRequest).count(), 1)
 
     def test_access_csrf_and_unavailable_catalog(self):
         self.csrf = False
