@@ -1,0 +1,242 @@
+[
+ {
+  "isbn": "9788936434120",
+  "title": "소년이 온다",
+  "author": "한강",
+  "publisher": "창비",
+  "pub_date": "2014-05-19",
+  "price": 15000,
+  "owned": false,
+  "description": "1980년 5월 광주에서 벌어진 일을, 남겨진 사람들의 목소리로 따라가는 장편소설."
+ },
+ {
+  "isbn": "9791161571188",
+  "title": "불편한 편의점",
+  "author": "김호연",
+  "publisher": "나무옆의자",
+  "pub_date": "2021-04-20",
+  "price": 14000,
+  "owned": false,
+  "description": "서울역 노숙인이 동네 편의점 야간 알바를 맡으며 이웃들과 가까워지는 이야기."
+ },
+ {
+  "isbn": "9791189327156",
+  "title": "물고기는 존재하지 않는다",
+  "author": "룰루 밀러",
+  "publisher": "곰출판",
+  "pub_date": "2021-12-17",
+  "price": 17000,
+  "owned": false,
+  "description": "한 분류학자의 삶을 추적하다 질서와 혼돈에 대한 믿음을 다시 묻게 되는 논픽션."
+ },
+ {
+  "isbn": "9788966260959",
+  "title": "클린 코드",
+  "author": "로버트 C. 마틴",
+  "publisher": "인사이트",
+  "pub_date": "2013-12-24",
+  "price": 33000,
+  "owned": false,
+  "description": "읽기 좋은 코드를 쓰기 위한 원칙과 사례를 정리한 프로그래밍 교양서."
+ },
+ {
+  "isbn": "9791165341909",
+  "title": "달러구트 꿈 백화점",
+  "author": "이미예",
+  "publisher": "팩토리나인",
+  "pub_date": "2020-07-08",
+  "price": 13800,
+  "owned": false,
+  "description": "잠들어야만 들어갈 수 있는 꿈 백화점에서 일하게 된 신입 직원의 이야기."
+ },
+ {
+  "isbn": "9788954677158",
+  "title": "긴긴밤",
+  "author": "루리",
+  "publisher": "문학동네",
+  "pub_date": "2021-02-03",
+  "price": 11500,
+  "owned": false,
+  "description": "세상에 하나 남은 흰바위코뿔소와 어린 펭귄이 바다를 찾아 떠나는 여정."
+ },
+ {
+  "isbn": "9788934972464",
+  "title": "사피엔스",
+  "author": "유발 하라리",
+  "publisher": "김영사",
+  "pub_date": "2015-11-24",
+  "price": 22000,
+  "owned": false,
+  "description": "인지·농업·과학 혁명을 축으로 인류의 역사를 훑어보는 교양서."
+ },
+ {
+  "isbn": "9791162245651",
+  "title": "혼자 공부하는 파이썬",
+  "author": "윤인성",
+  "publisher": "한빛미디어",
+  "pub_date": "2022-06-01",
+  "price": 22000,
+  "owned": false,
+  "description": "프로그래밍이 처음인 독자를 위한 파이썬 입문서."
+ },
+ {
+  "isbn": "9788998441012",
+  "title": "모순",
+  "author": "양귀자",
+  "publisher": "쓰다",
+  "pub_date": "2013-04-01",
+  "price": null,
+  "owned": false,
+  "description": "스물다섯 살 안진진이 자기 삶의 모순을 들여다보며 선택을 해 나가는 장편소설."
+ },
+ {
+  "isbn": "9788936456894",
+  "title": "페인트",
+  "author": "이희영",
+  "publisher": "창비",
+  "pub_date": "2019-04-19",
+  "price": 12000,
+  "owned": true,
+  "description": "부모를 직접 면접해 고를 수 있는 근미래를 그린 청소년 소설."
+ },
+ {
+  "isbn": "9788996991342",
+  "title": "미움받을 용기",
+  "author": "기시미 이치로, 고가 후미타케",
+  "publisher": "인플루엔셜",
+  "pub_date": "2014-11-17",
+  "price": 14900,
+  "owned": false,
+  "description": "철학자와 청년의 대화로 아들러 심리학을 풀어 쓴 책."
+ },
+ {
+  "isbn": "9788932473901",
+  "title": "이기적 유전자",
+  "author": "리처드 도킨스",
+  "publisher": "을유문화사",
+  "pub_date": "2018-10-20",
+  "price": 20000,
+  "owned": true,
+  "description": "유전자의 관점에서 진화와 생물의 행동을 설명하는 과학 교양서."
+ },
+ {
+  "isbn": "9788937460449",
+  "title": "데미안",
+  "author": "헤르만 헤세",
+  "publisher": "민음사",
+  "pub_date": "2000-12-20",
+  "price": 8000,
+  "owned": true,
+  "description": "소년 싱클레어가 자기 자신에게 이르는 길을 찾아가는 성장소설."
+ },
+ {
+  "isbn": "9788936434267",
+  "title": "아몬드",
+  "author": "손원평",
+  "publisher": "창비",
+  "pub_date": "2017-03-31",
+  "price": 12000,
+  "owned": true,
+  "description": "감정을 느끼지 못하는 소년 윤재가 타인과 관계 맺는 법을 배워 가는 이야기."
+ },
+ {
+  "isbn": "9788983711892",
+  "title": "코스모스",
+  "author": "칼 세이건",
+  "publisher": "사이언스북스",
+  "pub_date": "2006-12-20",
+  "price": 19900,
+  "owned": true,
+  "description": "우주와 생명, 과학의 역사를 한 권으로 풀어낸 과학 교양의 고전."
+ },
+ {
+  "isbn": "9788934942467",
+  "title": "총 균 쇠",
+  "author": "재레드 다이아몬드",
+  "publisher": "김영사",
+  "pub_date": "2023-05-10",
+  "price": 29800,
+  "owned": true,
+  "description": "대륙마다 문명의 속도가 달랐던 이유를 환경에서 찾는 책."
+ },
+ {
+  "isbn": "9788954603072",
+  "title": "어린 왕자",
+  "author": "앙투안 드 생텍쥐페리",
+  "publisher": "문학동네",
+  "pub_date": "2007-05-02",
+  "price": 9000,
+  "owned": true,
+  "description": "사막에 불시착한 조종사가 작은 별에서 온 왕자를 만나는 이야기."
+ },
+ {
+  "isbn": "9788936433598",
+  "title": "채식주의자",
+  "author": "한강",
+  "publisher": "창비",
+  "pub_date": "2007-10-30",
+  "price": 15000,
+  "owned": true,
+  "description": "어느 날 고기를 거부하기 시작한 영혜를 세 사람의 시선으로 그린 연작소설."
+ },
+ {
+  "isbn": "9788949123493",
+  "title": "순례 주택",
+  "author": "유은실",
+  "publisher": "비룡소",
+  "pub_date": "2021-03-05",
+  "price": 13000,
+  "owned": false,
+  "description": "빌라 '순례 주택'에 들어와 살게 된 가족과 열여섯 살 수림이의 이야기."
+ },
+ {
+  "isbn": "9788934985068",
+  "title": "팩트풀니스",
+  "author": "한스 로슬링",
+  "publisher": "김영사",
+  "pub_date": "2019-03-08",
+  "price": 19800,
+  "owned": false,
+  "description": "세상을 실제보다 나쁘게 보게 만드는 열 가지 본능을 데이터로 짚는 책."
+ },
+ {
+  "isbn": "9788937834790",
+  "title": "정의란 무엇인가",
+  "author": "마이클 샌델",
+  "publisher": "와이즈베리",
+  "pub_date": "2014-11-20",
+  "price": 15000,
+  "owned": false,
+  "description": "일상의 딜레마를 통해 정의에 대한 여러 철학적 관점을 살펴보는 책."
+ },
+ {
+  "isbn": "9788972756194",
+  "title": "나미야 잡화점의 기적",
+  "author": "히가시노 게이고",
+  "publisher": "현대문학",
+  "pub_date": "2012-12-19",
+  "price": 14800,
+  "owned": false,
+  "description": "오래된 잡화점에 숨어든 세 사람이 과거에서 온 고민 편지에 답장을 쓰게 되는 이야기."
+ },
+ {
+  "isbn": "9791168340510",
+  "title": "파친코 1",
+  "author": "이민진",
+  "publisher": "인플루엔셜",
+  "pub_date": "2022-07-27",
+  "price": 15800,
+  "owned": false,
+  "description": "일제강점기부터 이어지는 재일조선인 4대 가족의 삶을 그린 장편소설."
+ },
+ {
+  "isbn": "9791196394509",
+  "title": "죽고 싶지만 떡볶이는 먹고 싶어",
+  "author": "백세희",
+  "publisher": "흔",
+  "pub_date": "2018-06-20",
+  "price": 13800,
+  "owned": false,
+  "description": "기분부전장애를 겪는 저자가 정신과 상담 과정을 기록한 에세이."
+ }
+]

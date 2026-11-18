@@ -22,7 +22,12 @@ def create_app():
 
     from app.admin.routes import admin_api
 
+    from app.books.sources import configure_sources
+    from app.cors import init_cors
+
     db.init_app(app)
+    init_cors(app)
+    configure_sources(app)
     app.before_request(resolve_session)
     app.register_blueprint(auth_api)
     app.register_blueprint(api)
