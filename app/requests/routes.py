@@ -1,13 +1,18 @@
+"""Student requests and notifications (FE db.ts requestBook / cancelRequest / notifications)."""
 from flask import Blueprint, current_app, g, request
-from sqlalchemy import select, func
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from app.db import db
+from app.books import service
 from app.books.isbn import normalize_isbn
-from app.books.models import BookRequest, Notification, RequestedBook
+from app.books.models import BookRequest, Notification, RequestedBook, utcnow
 from app.books.providers import ProviderError, ProviderTimeout, ProviderUnavailable
-from app.books.routes import error
+from app.books.routes import provider_error
+from app.errors import (AUTH_REQUIRED, BOOK_NOT_FOUND, CATALOG_MESSAGE, CSRF_FAILED, FORBIDDEN_STUDENT, error, fail)
+from app.serializers import book_out, ms, request_out, review_out
 
 requests_api = Blueprint('student_requests', __name__, url_prefix='/api')
+STATUSES = ('pending', 'approved', 'rejected', 'purchased')
 
 
 def user():
@@ -21,56 +26,66 @@ def field(obj, name):
 def authorize(student=False, csrf=False):
     identity = user()
     if identity is None or field(identity, 'id') is None:
-        return error('AUTH_REQUIRED', '로그인이 필요합니다.', 401)
+        return fail(AUTH_REQUIRED)
     if student and field(identity, 'role') != 'student':
-        return error('FORBIDDEN', '학생만 이용할 수 있습니다.', 403)
+        return fail(FORBIDDEN_STUDENT)
     # Auth middleware must explicitly validate CSRF. Never trust the request directly.
     if csrf and getattr(g, 'csrf_valid', False) is not True:
-        return error('CSRF_FAILED', '요청을 확인할 수 없습니다.', 403)
+        return fail(CSRF_FAILED)
     return None
 
 
-def pages():
-    vals = []
-    for name, default in (('page', '1'), ('page_size', '20')):
-        value = request.args.get(name, default)
-        if not value.isascii() or not value.isdigit():
-            raise ValueError(name)
-        vals.append(int(value))
-    if vals[0] < 1 or not 1 <= vals[1] <= 100:
-        raise ValueError('pagination')
-    return vals
+class Rejected(Exception):
+    def __init__(self, response):
+        self.response = response
 
 
-def timestamp(value):
-    return value.isoformat(timespec='seconds') + 'Z' if value else None
+def catalog_unavailable():
+    return error('LIBRARY_CATALOG_UNAVAILABLE', CATALOG_MESSAGE, 503)
 
 
-def request_item(item):
-    book = item.book
-    return {'id': str(item.id), 'isbn': book.isbn, 'title': book.title,
-            'author': book.author, 'publisher': book.publisher, 'price': item.price,
-            'status': item.status, 'reject_reason': item.reject_reason,
-            'processed_at': timestamp(item.processed_at),
-            'requested_at': timestamp(item.requested_at)}
+def catalog_ownership(isbn, row):
+    """OWNED if purchased or the catalogue says so; None when the catalogue cannot say."""
+    if row is not None and row.status == 'purchased':
+        return 'OWNED'
+    catalog = current_app.config.get('LIBRARY_CATALOG')
+    return None if catalog is None else catalog.ownership(isbn)
 
 
-def source_error(exc):
-    if isinstance(exc, ProviderTimeout):
-        return error('BOOK_PROVIDER_TIMEOUT', '도서 제공처 응답 시간이 초과되었습니다.', 504)
-    if isinstance(exc, ProviderError):
-        return error('BOOK_PROVIDER_ERROR', '도서 제공처에 문제가 발생했습니다.', 502)
-    return error('BOOK_PROVIDER_UNAVAILABLE', '도서 제공처를 사용할 수 없습니다.', 503)
-
-
-def has_purchased_request(book_id):
-    # Locking read sees committed state under MySQL REPEATABLE READ as well.
-    return db.session.execute(
-        select(BookRequest.id).where(
-            BookRequest.requested_book_id == book_id,
-            BookRequest.status == 'PURCHASED',
-        ).limit(1).with_for_update()
-    ).scalar_one_or_none() is not None
+def create_once(isbn, uid):
+    # FE requestBook order: owned -> already requested -> rejected. Catalogue "unknown" blocks last (fail closed).
+    row = db.session.execute(select(RequestedBook).where(RequestedBook.isbn == isbn).with_for_update()).scalar_one_or_none()
+    ownership = catalog_ownership(isbn, row)
+    if ownership == 'OWNED':
+        raise Rejected(error('OWNED_BOOK', '이미 교내에 소장 중인 도서예요.', 409))
+    if row is not None and db.session.scalar(select(func.count(BookRequest.id)).where(BookRequest.requested_book_id == row.id, BookRequest.user_id == uid)):
+        raise Rejected(error('DUPLICATE_REQUEST', '이미 신청한 도서예요.', 409))
+    if row is not None and row.status == 'rejected':
+        raise Rejected(error('REJECTED_BOOK', '반려된 도서는 다시 신청할 수 없어요.', 409))
+    if ownership != 'NOT_OWNED':
+        raise Rejected(catalog_unavailable())
+    if row is None:
+        provider = current_app.config.get('BOOK_PROVIDER')
+        if provider is None:
+            raise ProviderUnavailable()
+        raw = provider.get(isbn)
+        if raw is None:
+            raise Rejected(fail(BOOK_NOT_FOUND))
+        meta = service.source_meta(raw)
+        if meta is None:
+            raise ProviderError()
+        # Only a newly created row takes the provider price; librarian-entered prices are never overwritten.
+        row = RequestedBook(isbn=isbn, title=meta['title'], author=meta['author'], publisher=meta['publisher'], price=meta['price'],
+                            cover_url=meta['cover_url'], pub_date=meta['pub_date'], description=meta['description'],
+                            status='pending', quantity=1)
+        db.session.add(row)
+        db.session.flush()
+    item = BookRequest(user_id=uid, book=row)
+    db.session.add(item)
+    db.session.flush()
+    body = {'request': request_out(item), 'review': review_out(row)}
+    db.session.commit()
+    return body, 201
 
 
 @requests_api.post('/requests')
@@ -78,72 +93,30 @@ def create_request():
     denied = authorize(student=True, csrf=True)
     if denied: return denied
     body = request.get_json(silent=True)
-    if not isinstance(body, dict) or set(body) != {'isbn'}:
-        return error('VALIDATION_ERROR', 'ISBN을 확인해 주세요.', 400)
+    if not isinstance(body, dict) or len(body) != 1 or next(iter(body)) not in ('bookId', 'isbn'):
+        return error('VALIDATION_ERROR', '도서 정보를 확인해 주세요.', 400)
     try:
-        isbn = normalize_isbn(body['isbn'])
+        isbn = normalize_isbn(next(iter(body.values())))
     except ValueError:
-        return error('VALIDATION_ERROR', 'ISBN을 확인해 주세요.', 400)
-    provider = current_app.config.get('BOOK_PROVIDER')
-    catalog = current_app.config.get('LIBRARY_CATALOG')
-    if provider is None:
-        return error('BOOK_PROVIDER_UNAVAILABLE', '도서 제공처를 사용할 수 없습니다.', 503)
-    if catalog is None:
-        return error('LIBRARY_CATALOG_UNAVAILABLE', '교내 목록을 사용할 수 없습니다.', 503)
+        return error('VALIDATION_ERROR', '도서 정보를 확인해 주세요.', 400)
+    uid = field(user(), 'id')
     try:
-        ownership = catalog.ownership(isbn)
-        info = provider.get(isbn)
-    except (ProviderUnavailable, ProviderError, ProviderTimeout) as exc:
-        return source_error(exc)
-    if ownership not in ('OWNED', 'NOT_OWNED'):
-        return error('LIBRARY_CATALOG_UNAVAILABLE', '소장 여부를 확인할 수 없습니다.', 503)
-    if ownership == 'OWNED':
-        return error('OWNED_BOOK', '이미 소장 중인 도서입니다.', 409)
-    if info is None:
-        return error('NOT_FOUND', '도서를 찾을 수 없습니다.', 404)
-    if not isinstance(info, dict) or any(not isinstance(info.get(k), str) or not info[k].strip() for k in ('title', 'author', 'publisher')):
-        return error('BOOK_PROVIDER_ERROR', '도서 정보가 올바르지 않습니다.', 502)
-    price = info.get('price')
-    if price is not None and (type(price) is not int or price < 0):
-        return error('BOOK_PROVIDER_ERROR', '도서 가격이 올바르지 않습니다.', 502)
-    try:
-        book = db.session.execute(select(RequestedBook).where(RequestedBook.isbn == isbn).with_for_update()).scalar_one_or_none()
-        if book is None:
-            book = RequestedBook(isbn=isbn, title=info['title'], author=info['author'], publisher=info['publisher'], price=price, cover_url=info.get('cover_url'))
-            db.session.add(book)
-            db.session.flush()
-        if book.status in ('rejected', 'purchased') or has_purchased_request(book.id):
-            db.session.rollback()
-            return error('STATE_CONFLICT', '신청할 수 없는 도서입니다.', 409)
-        item = BookRequest(user_id=field(user(), 'id'), book=book, price=price)
-        db.session.add(item)
-        db.session.flush()
-        response = request_item(item)
-        db.session.commit()
-        return response, 201
-    except IntegrityError:
-        db.session.rollback()
-        # The ISBN row may have been created concurrently by another user.
-        # Retry once using the now committed row, preserving duplicate protection.
         try:
-            book = db.session.execute(select(RequestedBook).where(RequestedBook.isbn == isbn).with_for_update()).scalar_one_or_none()
-            if book is None:
-                raise RuntimeError('Concurrent book row unavailable')
-            if book.status in ('rejected', 'purchased') or has_purchased_request(book.id):
-                db.session.rollback()
-                return error('STATE_CONFLICT', '신청할 수 없는 도서입니다.', 409)
-            item = BookRequest(user_id=field(user(), 'id'), book=book, price=price)
-            db.session.add(item)
-            db.session.flush()
-            response = request_item(item)
-            db.session.commit()
-            return response, 201
+            return create_once(isbn, uid)
         except IntegrityError:
+            # Another request created the same book/request concurrently: retry once on committed state.
             db.session.rollback()
-            return error('DUPLICATE_REQUEST', '이미 신청한 도서입니다.', 409)
-        except Exception:
-            db.session.rollback()
-            raise
+            try:
+                return create_once(isbn, uid)
+            except IntegrityError:
+                db.session.rollback()
+                return error('DUPLICATE_REQUEST', '이미 신청한 도서예요.', 409)
+    except Rejected as exc:
+        db.session.rollback()
+        return exc.response
+    except (ProviderUnavailable, ProviderError, ProviderTimeout) as exc:
+        db.session.rollback()
+        return provider_error(exc)
     except Exception:
         db.session.rollback()
         raise
@@ -153,34 +126,77 @@ def create_request():
 def list_requests():
     denied = authorize(student=True)
     if denied: return denied
-    try: page, size = pages()
-    except ValueError: return error('VALIDATION_ERROR', '페이지를 확인해 주세요.', 400)
     status = request.args.get('status')
-    if status and status not in ('PENDING', 'APPROVED', 'REJECTED', 'PURCHASED'):
+    if status and status not in STATUSES:
         return error('VALIDATION_ERROR', '상태를 확인해 주세요.', 400)
     query = select(BookRequest).join(RequestedBook).where(BookRequest.user_id == field(user(), 'id'))
-    if status: query = query.where(BookRequest.status == status)
-    total = db.session.scalar(select(func.count()).select_from(query.subquery()))
-    items = db.session.execute(query.order_by(BookRequest.requested_at.desc(), BookRequest.id.desc()).offset((page-1)*size).limit(size)).scalars().all()
-    return {'items': [request_item(item) for item in items], 'page': page, 'page_size': size, 'total': total}
+    if status:
+        query = query.where(RequestedBook.status == status)
+    rows = db.session.scalars(query.order_by(BookRequest.requested_at.desc(), BookRequest.id.desc())).all()
+    items = []
+    for item in rows:
+        entry = {'request': request_out(item), 'book': book_out(service.row_meta(item.book), service.is_owned(item.book.isbn, item.book.status)),
+                 'status': item.book.status}
+        if item.book.status == 'rejected' and item.book.reject_reason:
+            entry['reason'] = item.book.reject_reason
+        items.append(entry)
+    return {'items': items}
+
+
+@requests_api.delete('/me/requests/<int:request_id>')
+def cancel_request(request_id):
+    denied = authorize(student=True, csrf=True)
+    if denied: return denied
+    target = db.session.get(BookRequest, request_id)
+    if target is None or target.user_id != field(user(), 'id'):
+        return error('NOT_FOUND', '신청 내역을 찾을 수 없어요.', 404)
+    book = db.session.execute(select(RequestedBook).where(RequestedBook.id == target.requested_book_id).with_for_update()).scalar_one()
+    if book.status != 'pending':
+        db.session.rollback()
+        return error('STATE_CONFLICT', '대기 중인 신청만 취소할 수 있어요.', 409)
+    # Notifications outlive the request (ON DELETE SET NULL); do it explicitly so SQLite behaves the same.
+    db.session.execute(update(Notification).where(Notification.request_id == target.id).values(request_id=None))
+    db.session.delete(target)
+    db.session.flush()
+    remaining = db.session.scalar(select(func.count(BookRequest.id)).where(BookRequest.requested_book_id == book.id))
+    if remaining == 0:
+        # Last requester left: the book drops off the librarian list. Row and price are kept.
+        book.status, book.reject_reason, book.quantity, book.updated_at = 'pending', None, 1, utcnow()
+    db.session.commit()
+    return '', 204
+
+
+def notification_out(item):
+    data = {'id': str(item.id), 'userId': str(item.user_id), 'bookId': item.book.isbn, 'bookTitle': item.book.title,
+            'status': item.type, 'createdAt': ms(item.created_at), 'read': bool(item.is_read), 'message': item.message}
+    if item.reason:
+        data['reason'] = item.reason
+    return data
 
 
 @requests_api.get('/me/notifications')
 def list_notifications():
     denied = authorize()
     if denied: return denied
-    try: page, size = pages()
-    except ValueError: return error('VALIDATION_ERROR', '페이지를 확인해 주세요.', 400)
-    unread = request.args.get('unread_only', 'false')
+    unread = request.args.get('unreadOnly', 'false')
     if unread not in ('true', 'false'):
         return error('VALIDATION_ERROR', '읽음 조건을 확인해 주세요.', 400)
     uid = field(user(), 'id')
     query = select(Notification).where(Notification.user_id == uid)
     count = db.session.scalar(select(func.count()).select_from(Notification).where(Notification.user_id == uid, Notification.is_read.is_(False)))
-    if unread == 'true': query = query.where(Notification.is_read.is_(False))
-    total = db.session.scalar(select(func.count()).select_from(query.subquery()))
-    items = db.session.execute(query.order_by(Notification.created_at.desc(), Notification.id.desc()).offset((page-1)*size).limit(size)).scalars().all()
-    return {'items': [{'id': str(n.id), 'request_id': str(n.request_id), 'message': n.message, 'type': n.type, 'is_read': n.is_read, 'created_at': timestamp(n.created_at)} for n in items], 'page': page, 'page_size': size, 'total': total, 'unread_count': count}
+    if unread == 'true':
+        query = query.where(Notification.is_read.is_(False))
+    items = db.session.scalars(query.order_by(Notification.created_at.desc(), Notification.id.desc())).all()
+    return {'items': [notification_out(n) for n in items], 'unreadCount': count}
+
+
+@requests_api.patch('/me/notifications/read-all')
+def read_all_notifications():
+    denied = authorize(csrf=True)
+    if denied: return denied
+    result = db.session.execute(update(Notification).where(Notification.user_id == field(user(), 'id'), Notification.is_read.is_(False)).values(is_read=True))
+    db.session.commit()
+    return {'updated': result.rowcount}
 
 
 @requests_api.patch('/me/notifications/<int:notification_id>/read')
@@ -188,7 +204,7 @@ def read_notification(notification_id):
     denied = authorize(csrf=True)
     if denied: return denied
     item = db.session.execute(select(Notification).where(Notification.id == notification_id, Notification.user_id == field(user(), 'id'))).scalar_one_or_none()
-    if item is None: return error('NOT_FOUND', '알림을 찾을 수 없습니다.', 404)
+    if item is None: return error('NOT_FOUND', '알림을 찾을 수 없어요.', 404)
     item.is_read = True
     db.session.commit()
-    return {'id': str(item.id), 'is_read': True}
+    return {'id': str(item.id), 'read': True}
