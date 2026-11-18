@@ -14,6 +14,11 @@ def create_app():
     app.config.from_object(Config())
     app.json.ensure_ascii = False
 
+    # Sessions and CSRF are signed/derived with this key; refuse to start without it instead of serving unauthenticated.
+    # Nothing below (resolve_session hook, auth blueprint) is registered when this fails.
+    if not (app.config.get("SECRET_KEY") or "").strip():
+        raise RuntimeError("SECRET_KEY가 비어 있어요. .env에 SECRET_KEY를 설정한 뒤 다시 시작해 주세요.")
+
     from app.routes import api
 
     from app.books.routes import books_api

@@ -73,8 +73,12 @@ def day_bound(value, end=False):
         day = date.fromisoformat(value)
     except ValueError:
         raise APIError() from None
-    start = datetime(day.year, day.month, day.day, tzinfo=KST) + (timedelta(days=1) if end else timedelta())
-    return to_utc_naive(start)
+    try:
+        # End bound = next midnight (exclusive). Dates at the edge of the calendar overflow: treat as a bad filter.
+        start = datetime(day.year, day.month, day.day, tzinfo=KST) + (timedelta(days=1) if end else timedelta())
+        return to_utc_naive(start)
+    except (OverflowError, ValueError):
+        raise APIError() from None
 
 
 def parse_filters(source):
@@ -129,8 +133,9 @@ def title_key(row):
     return (title.casefold(), title.swapcase())
 
 
-def filtered(f):
-    rows = [r for r in load_rows() if matches(r, f)]
+def filtered(f, loaded=None):
+    """loaded: rows already read by the caller, so one request reads the DB once."""
+    rows = [r for r in (load_rows() if loaded is None else loaded) if matches(r, f)]
     if f['sort'] == 'count':
         rows.sort(key=lambda r: -len(r['requests']))  # stable: ties keep latest-first
     elif f['sort'] == 'title':
@@ -152,7 +157,7 @@ def list_books(args):
     f = parse_filters(args)
     page, size = paging(args)
     everything = load_rows()
-    rows = filtered(f)
+    rows = filtered(f, everything)
     total = len(rows)
     page = min(page, max(1, math.ceil(total / size)))
     summary = {'total': len(everything), **{s: sum(1 for r in everything if r['book'].status == s) for s in STATUSES}}
@@ -162,7 +167,9 @@ def list_books(args):
 
 
 def export_books(body):
-    f = parse_filters(body if isinstance(body, dict) else {})
+    if not isinstance(body, dict):
+        raise APIError()
+    f = parse_filters(body)
     rows = filtered(f)
     out = []
     for r in rows:
@@ -188,10 +195,13 @@ def isbn_list(body, minimum=1):
 
 
 def locked_row(isbn):
-    row = db.session.execute(select(RequestedBook).where(RequestedBook.isbn == isbn).with_for_update()).scalar_one_or_none()
+    # populate_existing: after waiting for the lock, use the latest committed values, not an earlier snapshot.
+    row = db.session.execute(select(RequestedBook).where(RequestedBook.isbn == isbn).with_for_update()
+                             .execution_options(populate_existing=True)).scalar_one_or_none()
     if row is None:
         return None
-    has_requests = db.session.scalar(select(func.count(BookRequest.id)).where(BookRequest.requested_book_id == row.id))
+    # A plain COUNT(*) would read the transaction's snapshot (REPEATABLE READ); a locking read sees the latest commits.
+    has_requests = db.session.execute(select(BookRequest.id).where(BookRequest.requested_book_id == row.id).limit(1).with_for_update()).first()
     return row if has_requests else None
 
 
@@ -205,7 +215,7 @@ def notification_message(status, title, reason):
 def change_status(body, actor_id):
     ids = isbn_list(body)
     status = body.get('status')
-    if status not in ALLOWED_FROM:
+    if not isinstance(status, str) or status not in ALLOWED_FROM:
         raise APIError()
     reason = body.get('reason')
     if status == 'rejected':
@@ -214,44 +224,48 @@ def change_status(body, actor_id):
         reason = reason.strip()
     else:
         reason = None
-    stamp, changed = now(), []
-    for isbn in ids:
+    changed = {}
+    # Lock books in ISBN order whatever order the client sent, so [A,B] and [B,A] cannot deadlock.
+    for isbn in sorted(ids):
         row = locked_row(isbn)
         # Books that cannot make this move are skipped, not errors (FE setStatus).
         if row is None or row.status != ALLOWED_FROM[status]:
             continue
+        stamp = now()  # taken after the lock and the transition check
         result = db.session.execute(update(RequestedBook).where(RequestedBook.id == row.id, RequestedBook.status == ALLOWED_FROM[status])
                                     .values(status=status, reject_reason=reason, updated_at=stamp).execution_options(synchronize_session=False))
         if result.rowcount != 1:
             continue
         db.session.expire(row)
         db.session.add(ReviewLog(requested_book_id=row.id, status=status, actor_id=actor_id, created_at=stamp))
-        for request in db.session.scalars(select(BookRequest).where(BookRequest.requested_book_id == row.id).order_by(BookRequest.id)):
+        # Locking read: requesters added after this transaction's snapshot must be notified too.
+        for request in db.session.scalars(select(BookRequest).where(BookRequest.requested_book_id == row.id).order_by(BookRequest.id).with_for_update()):
             db.session.add(Notification(user_id=request.user_id, request_id=request.id, requested_book_id=row.id, type=status, reason=reason,
                                         message=notification_message(status, row.title, reason), created_at=stamp))
-        changed.append(row)
+        changed[isbn] = row
     db.session.flush()
-    items = [review_out(r) for r in changed]
+    items = [review_out(changed[i]) for i in ids if i in changed]  # response keeps the request order
     db.session.commit()
     return {'changed': len(items), 'items': items}
 
 
 def revert_status(body):
     ids = isbn_list(body)
-    stamp, changed = now(), []
-    for isbn in ids:
+    changed = {}
+    for isbn in sorted(ids):  # same lock order as change_status
         row = locked_row(isbn)
         if row is None or row.status == 'pending':
             continue
+        stamp = now()
         previous = row.status
         result = db.session.execute(update(RequestedBook).where(RequestedBook.id == row.id, RequestedBook.status == previous)
                                     .values(status=REVERT_TO[previous], reject_reason=None, updated_at=stamp).execution_options(synchronize_session=False))
         if result.rowcount != 1:
             continue
         db.session.expire(row)
-        changed.append(row)  # no notification and no log: reverts are silent in the FE
+        changed[isbn] = row  # no notification and no log: reverts are silent in the FE
     db.session.flush()
-    items = [review_out(r) for r in changed]
+    items = [review_out(changed[i]) for i in ids if i in changed]
     db.session.commit()
     return {'changed': len(items), 'items': items}
 
@@ -275,10 +289,15 @@ def set_quantity(book_id, body):
     if not isinstance(body, dict) or set(body) != {'quantity'}:
         raise APIError()
     quantity = body['quantity']
-    if type(quantity) not in (int, float) or not math.isfinite(quantity):
+    # Integers are clamped directly (no float conversion); finiteness and floor only apply to floats.
+    if type(quantity) is int:
+        whole = quantity
+    elif type(quantity) is float and math.isfinite(quantity):
+        whole = math.floor(quantity)
+    else:
         raise APIError(message='수량을 확인해 주세요.')
     row = target_row(book_id)
-    row.quantity = min(max(0, math.floor(quantity)), INT_MAX)
+    row.quantity = min(max(0, whole), INT_MAX)
     row.updated_at = now()
     db.session.flush()
     data = review_out(row)
@@ -367,7 +386,9 @@ def budget(source, today=None):
 
 
 def budget_export(body):
-    data = budget(body if isinstance(body, dict) else {})
+    if not isinstance(body, dict):
+        raise APIError()
+    data = budget(body)
     def cells(kind, entry):
         book, review = entry['book'], entry['review']
         return [kind, book['title'], LABEL[review['status']], book['price'], review['quantity'], entry['subtotal']]

@@ -1,12 +1,42 @@
 -- 003: align with the FE contract (book-level state). Apply after 002_admin_request_state.sql.
--- Review and back up first; MySQL 8 DDL auto-commits. Run with the mysql client WITHOUT --force
--- so the script stops at the first error. NEVER run against production without approval.
+--
+-- BEFORE YOU RUN (MySQL 8 DDL auto-commits, so this script cannot be rolled back):
+--   1. Stop every write to the application (API and CLI) for the whole run.
+--   2. Take a full backup (mysqldump of the BookBinder database) and keep it until the result is verified.
+--   3. Run with the mysql client WITHOUT --force so the script stops at the first error.
+--      NEVER run against production without approval.
+-- IF IT FAILS HALFWAY: do NOT rely on ROLLBACK and do NOT re-run the script on the partly changed database
+--   (later steps are not idempotent). Restore the backup taken in step 2, fix the cause, then run from the start.
+-- NOTE: review_logs starts empty. The weekly counts (weekApproved/weekRejected) only include processing done
+--   after this migration; earlier approvals/rejections cannot be rebuilt (processed_at keeps only the last value).
 
 SET SESSION sql_mode = CONCAT_WS(',', @@SESSION.sql_mode, 'STRICT_ALL_TABLES');
 
--- 1) ISBN must exist for every book (FE uses it as the book id). No values are invented:
---    if any row has NULL isbn, the ALTER below fails and the script stops. Fix those rows by hand.
-SELECT COUNT(*) AS requested_books_with_null_isbn FROM requested_books WHERE isbn IS NULL;
+-- 0) Pre-flight, BEFORE the first DDL. Stops (SIGNAL) without changing anything when an ISBN is not already a
+--    canonical ISBN-13. The API looks books up by the normalised ISBN-13, so an old ISBN-10 row (002 allowed them)
+--    would not be found and the same book could be requested twice. Nothing is converted or deleted here: fix
+--    the listed rows by hand while keeping their requests/notifications, e.g. UPDATE the isbn to its ISBN-13 when
+--    no row uses it yet, or move book_requests/notifications/review references to the existing ISBN-13 row
+--    (watch the UNIQUE(user_id, requested_book_id) rule) and then delete the empty old row.
+DROP PROCEDURE IF EXISTS bb_003_preflight;
+DELIMITER //
+CREATE PROCEDURE bb_003_preflight()
+BEGIN
+  DECLARE null_isbn INT;
+  DECLARE odd_isbn INT;
+  SELECT COUNT(*) INTO null_isbn FROM requested_books WHERE isbn IS NULL;
+  SELECT COUNT(*) INTO odd_isbn FROM requested_books WHERE isbn IS NOT NULL AND isbn NOT REGEXP '^97[89][0-9]{10}$';
+  IF null_isbn > 0 OR odd_isbn > 0 THEN
+    SELECT b.id, b.isbn, b.title, (SELECT COUNT(*) FROM book_requests r WHERE r.requested_book_id = b.id) AS requests
+      FROM requested_books b WHERE b.isbn IS NULL OR b.isbn NOT REGEXP '^97[89][0-9]{10}$';
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = '003 stopped: requested_books has NULL or non-ISBN-13 isbn rows (listed above). Clean them up by hand first.';
+  END IF;
+END//
+DELIMITER ;
+CALL bb_003_preflight();
+DROP PROCEDURE bb_003_preflight;
+
+-- 1) ISBN must exist for every book (FE uses it as the book id). The pre-flight above already guarantees it.
 ALTER TABLE requested_books MODIFY isbn VARCHAR(13) NOT NULL;
 
 -- 2) Report books whose requests had different request-level states (merged by the rule below).
@@ -66,7 +96,7 @@ CREATE TABLE review_logs (
   requested_book_id BIGINT NOT NULL,
   status VARCHAR(16) NOT NULL,
   actor_id BIGINT NOT NULL,
-  created_at DATETIME NOT NULL,
+  created_at DATETIME(6) NOT NULL,  -- fractional seconds kept so week-boundary counts are exact
   INDEX ix_review_log_book (requested_book_id),
   INDEX ix_review_log_actor (actor_id),
   INDEX ix_review_log_created (created_at),

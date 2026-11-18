@@ -12,6 +12,8 @@ from app.books.models import BookRequest, RequestedBook
 from app.books.providers import ProviderError, ProviderTimeout, ProviderUnavailable
 
 SOURCE_ERRORS = (ProviderUnavailable, ProviderError, ProviderTimeout)
+PROVIDER_PAGE_SIZE = 100
+MAX_PROVIDER_PAGES = 50  # safety cap: 5,000 hits per search
 
 
 def parse_date(value):
@@ -92,15 +94,20 @@ def _provider_items(query):
     provider = current_app.config.get('BOOK_PROVIDER')
     if provider is None:
         raise ProviderUnavailable()
-    result = provider.search(query, 1, 100)
-    items = result.get('items') if isinstance(result, dict) else None
-    if not isinstance(items, list):
-        raise ProviderError()
+    # Read every provider page first; de-duplication, the all-words filter, sorting and API paging happen afterwards.
     found = {}
-    for item in items:
-        meta = source_meta(item)
-        if meta and meta['isbn'] not in found:
-            found[meta['isbn']] = meta
+    for page in range(1, MAX_PROVIDER_PAGES + 1):
+        result = provider.search(query, page, PROVIDER_PAGE_SIZE)
+        items = result.get('items') if isinstance(result, dict) else None
+        if not isinstance(items, list):
+            raise ProviderError()
+        for item in items:
+            meta = source_meta(item)
+            if meta and meta['isbn'] not in found:
+                found[meta['isbn']] = meta
+        total = result.get('total')
+        if not items or (type(total) is int and page * PROVIDER_PAGE_SIZE >= total) or (type(total) is not int and len(items) < PROVIDER_PAGE_SIZE):
+            break
     return found
 
 
@@ -186,12 +193,18 @@ def detail(user_id, isbn):
         meta = row_meta(row)
     else:
         provider = current_app.config.get('BOOK_PROVIDER')
+        provider_error = None
         if provider is not None:
-            meta = source_meta(provider.get(isbn))
+            try:
+                meta = source_meta(provider.get(isbn))
+            except SOURCE_ERRORS as exc:
+                provider_error = exc  # keep it; the school catalogue may still know the book
         if meta is None:
             catalog = current_app.config.get('LIBRARY_CATALOG')
             if catalog is not None and hasattr(catalog, 'books'):
                 meta = next((m for m in (source_meta(i) for i in catalog.books()) if m and m['isbn'] == isbn), None)
+        if meta is None and provider_error is not None:
+            raise provider_error  # catalogue did not have it either: report the original provider failure
         if meta is None and provider is None:
             raise ProviderUnavailable()
     if meta is None:

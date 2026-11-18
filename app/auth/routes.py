@@ -63,10 +63,11 @@ def valid_text(value, maximum):
 LOGIN_ID = re.compile(r'[a-zA-Z0-9]{4,20}')
 CLASS_NO = re.compile(r'[1-3]-[0-9]{1,2}')
 STUDENT_NO = re.compile(r'[0-9]{5}')
+NEW_PASSWORD_MESSAGE = '새 비밀번호는 8~128자여야 해요.'
 FIELD_MESSAGES = {
     'name': '이름을 입력해 주세요.',
     'loginId': '영문·숫자 4~20자로 입력해 주세요.',
-    'password': '8자 이상 입력해 주세요.',
+    'password': '8~128자로 입력해 주세요.',
     'password2': '비밀번호가 서로 달라요.',
     'classNo': '2-3처럼 학년-반으로 입력해 주세요.',
     'studentNo': '숫자 5자리 학번을 입력해 주세요.',
@@ -144,9 +145,13 @@ def login():
     data = request.get_json(silent=True)
     if not isinstance(data, dict) or set(data) != {'loginId', 'password'} or not isinstance(data['loginId'], str) or not isinstance(data['password'], str) or not 1 <= len(data['loginId'].strip()) <= 50 or not 1 <= len(data['password']) <= 128:
         return error('VALIDATION_ERROR', '로그인 정보를 확인해 주세요.', 400)
-    account = db.session.execute(select(User).where(User.login_id == data['loginId'].strip().lower())).scalar_one_or_none()
+    # Lock the account row and verify against the latest hash while holding it, so a concurrent password change
+    # either finishes first (old password no longer works) or sees this new session and deletes it.
+    account = db.session.execute(select(User).where(User.login_id == data['loginId'].strip().lower())
+                                 .with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
     valid = check_password_hash(account.password_hash if account else DUMMY_HASH, data['password'])
     if not valid or account is None:
+        db.session.rollback()
         return error('INVALID_CREDENTIALS', '아이디 또는 비밀번호가 맞지 않아요.', 401)
     if g.auth_session: db.session.delete(g.auth_session)
     token, csrf = new_session(account.id)
@@ -207,14 +212,24 @@ def change_password():
             or not isinstance(data['currentPassword'], str) or not isinstance(data['newPassword'], str):
         return error('VALIDATION_ERROR', '비밀번호 정보를 확인해 주세요.', 400)
     if not 8 <= len(data['newPassword']) <= 128:
-        return error('VALIDATION_ERROR', '새 비밀번호는 8자 이상이어야 해요.', 400, {'newPassword': '새 비밀번호는 8자 이상이어야 해요.'})
+        return error('VALIDATION_ERROR', NEW_PASSWORD_MESSAGE, 400, {'newPassword': NEW_PASSWORD_MESSAGE})
     if 'newPasswordConfirm' in data and data['newPasswordConfirm'] != data['newPassword']:
         return error('VALIDATION_ERROR', '새 비밀번호가 서로 달라요.', 400, {'newPasswordConfirm': '새 비밀번호가 서로 달라요.'})
-    if not check_password_hash(g.current_user.password_hash, data['currentPassword']):
+    # Same lock order as login: account row first. Then re-read the hash and this request's session under the lock.
+    account = db.session.execute(select(User).where(User.id == g.current_user.id)
+                                 .with_for_update().execution_options(populate_existing=True)).scalar_one()
+    current = db.session.execute(select(AuthSession).where(AuthSession.token_hash == g.auth_session.token_hash)
+                                 .with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
+    if current is None or current.expires_at <= now():
+        # An earlier password change (or logout) already invalidated this session: stop before touching anything.
+        db.session.rollback()
+        return fail(AUTH_REQUIRED)
+    if not check_password_hash(account.password_hash, data['currentPassword']):
+        db.session.rollback()
         return error('INVALID_PASSWORD', '현재 비밀번호가 맞지 않아요.', 400)
-    g.current_user.password_hash = generate_password_hash(data['newPassword'])
+    account.password_hash = generate_password_hash(data['newPassword'])
     # Sign out every other session of this user; the current one stays.
-    db.session.execute(delete(AuthSession).where(AuthSession.user_id == g.current_user.id, AuthSession.token_hash != g.auth_session.token_hash))
+    db.session.execute(delete(AuthSession).where(AuthSession.user_id == account.id, AuthSession.token_hash != current.token_hash))
     db.session.commit()
     response = make_response('', 204)
     response.headers['Cache-Control'] = 'no-store'

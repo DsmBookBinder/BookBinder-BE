@@ -2,6 +2,7 @@
 
 Bold header row, frozen first row, column widths, and `#,##0` for every number.
 """
+import re
 from io import BytesIO
 from zipfile import ZipFile, ZIP_DEFLATED
 from xml.etree.ElementTree import Element, SubElement, tostring
@@ -9,6 +10,7 @@ from xml.etree.ElementTree import Element, SubElement, tostring
 NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
 XML_SPACE = '{http://www.w3.org/XML/1998/namespace}space'
 STYLE_NUMBER, STYLE_BOLD = '1', '2'
+ESCAPE_LOOKALIKE = re.compile(r'_(?=x[0-9A-Fa-f]{4}_)')
 STYLES = ('<styleSheet xmlns="%s"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font>'
           '<font><b/><sz val="11"/><name val="Calibri"/></font></fonts>'
           '<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>'
@@ -20,8 +22,12 @@ STYLES = ('<styleSheet xmlns="%s"><fonts count="2"><font><sz val="11"/><name val
 
 
 def clean(value):
-    """Remove characters forbidden by XML 1.0 while preserving ordinary text."""
-    return ''.join(c for c in str(value) if c in '\t\n\r' or 0x20 <= ord(c) <= 0xD7FF or 0xE000 <= ord(c) <= 0xFFFD or 0x10000 <= ord(c) <= 0x10FFFF)
+    """Remove characters forbidden by XML 1.0 while preserving ordinary text.
+
+    A literal `_xHHHH_` would be read back as an escaped character, so its first underscore is written as `_x005F_`.
+    """
+    text = ''.join(c for c in str(value) if c in '\t\n\r' or 0x20 <= ord(c) <= 0xD7FF or 0xE000 <= ord(c) <= 0xFFFD or 0x10000 <= ord(c) <= 0x10FFFF)
+    return ESCAPE_LOOKALIKE.sub('_x005F_', text)
 
 
 def column(index):
@@ -59,7 +65,7 @@ def workbook(header, rows, widths, sheet='Sheet1'):
     with ZipFile(output, 'w', ZIP_DEFLATED) as archive:
         archive.writestr('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>')
         archive.writestr('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>')
-        archive.writestr('xl/workbook.xml', '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="%s" sheetId="1" r:id="rId1"/></sheets></workbook>' % sheet)
+        archive.writestr('xl/workbook.xml', '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><bookViews><workbookView/></bookViews><sheets><sheet name="%s" sheetId="1" r:id="rId1"/></sheets></workbook>' % sheet)
         archive.writestr('xl/_rels/workbook.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>')
         archive.writestr('xl/styles.xml', STYLES)
         archive.writestr('xl/worksheets/sheet1.xml', tostring(root, encoding='utf-8', xml_declaration=True))

@@ -14,6 +14,7 @@ from app.books.routes import books_api
 from app.cors import init_cors
 from app.db import db
 from app.requests.routes import requests_api
+from app.routes import api as health_api
 
 ORIGIN = 'http://localhost:5173'
 SOSEON = '9788936434120'      # 소년이 온다, 15000, not owned
@@ -36,10 +37,16 @@ class AppCase(unittest.TestCase):
         db.init_app(self.app)
         init_cors(self.app)
         self.app.before_request(resolve_session)
-        for blueprint in (auth_api, books_api, requests_api, admin_api):
+        for blueprint in (health_api, auth_api, books_api, requests_api, admin_api):
             self.app.register_blueprint(blueprint)
         self.ctx = self.app.app_context()
         self.ctx.push()
+        # Registered right after push; callbacks run last-in-first-out and are independent, so one failing
+        # cleanup cannot stop the others (session -> tables -> engine -> context).
+        self.addCleanup(self.ctx.pop)
+        self.addCleanup(db.engine.dispose)
+        self.addCleanup(db.drop_all)
+        self.addCleanup(db.session.remove)
         db.create_all()
         self.users = {}
         for key, login, role, klass, no in (('s1', 'student1', 'student', '2-3', '20315'), ('s2', 'student2', 'student', '1-4', '10412'),
@@ -51,12 +58,6 @@ class AppCase(unittest.TestCase):
             self.users[key] = user.id
         db.session.commit()
         self.clients = {}
-
-    def tearDown(self):
-        db.session.remove()
-        db.drop_all()
-        db.engine.dispose()
-        self.ctx.pop()
 
     def as_user(self, key):
         """Logged-in client with its own cookie; returns (client, csrf headers)."""

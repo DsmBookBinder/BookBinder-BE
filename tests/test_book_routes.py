@@ -1,5 +1,8 @@
+import os
 import unittest
 from datetime import datetime
+from unittest.mock import patch
+from app.books.fixture import FixtureProvider, fixture_catalog, load_rows
 from app.books.providers import ProviderError, ProviderTimeout
 from tests.helpers import AppCase, CONVENIENCE, MODEUN, PAINT, SOSEON
 
@@ -33,9 +36,14 @@ class BookRouteTests(AppCase):
         self.assertEqual(self.search(q='한강 없는단어')['total'], 0)
         self.assertEqual(self.search(q='CLEAN')['total'], 0)  # 클린 코드 is Korean; no latin hit
         self.assertEqual([i['title'] for i in self.search(q='클린')['items']], ['클린 코드'])
-        # Title (+3) beats description-only (+1): '코드' is in 클린 코드's title.
+        # Title (+3) beats description-only (+1): add a book whose ONLY '코드' hit is its description.
+        extra = {'isbn': '9780306406157', 'title': '소프트웨어 장인', 'author': '홍길동', 'publisher': '출판사', 'pub_date': '2020-01-01',
+                 'price': 10000, 'owned': False, 'description': '읽기 좋은 코드를 쓰는 방법.'}
+        self.app.config['BOOK_PROVIDER'] = FixtureProvider(load_rows() + [extra])
         titles = [i['title'] for i in self.search(q='코드', pageSize=100)['items']]
-        self.assertEqual(titles[0], '클린 코드')
+        self.assertIn('소프트웨어 장인', titles)  # description-only match is still a hit
+        self.assertIn('클린 코드', titles)
+        self.assertLess(titles.index('클린 코드'), titles.index('소프트웨어 장인'))  # title match comes first
 
     def test_scope_owned_and_pagination(self):
         body = self.search(scope='owned', pageSize=3)
@@ -57,9 +65,19 @@ class BookRouteTests(AppCase):
         self.assertEqual((popular[0]['title'], popular[0]['requestCount']), ('소년이 온다', 2))
         self.assertEqual(popular[0]['requestState'], 'requested')
         self.assertEqual(self.search('s3', q='소년이')['items'][0]['requestState'], 'available')
-        # Ties keep relevance order; more requests first.
-        both = self.search(q='편의점', sort='popular')['items'] + self.search(q='소년이', sort='popular')['items']
-        self.assertEqual([i['requestCount'] for i in both], [1, 2])
+
+    def test_popular_sort_orders_by_request_count_before_relevance(self):
+        # q=이: 소년이 온다 matches by title (+3), 불편한 편의점 only by description (+1).
+        self.request_book('s1', SOSEON)
+        for key in ('s1', 's2', 's3'):
+            self.request_book(key, CONVENIENCE)
+        by_relevance = [i['title'] for i in self.search(q='이', pageSize=100)['items']]
+        self.assertLess(by_relevance.index('소년이 온다'), by_relevance.index('불편한 편의점'))
+        popular = self.search(q='이', sort='popular', pageSize=100)['items']  # one call: same query, popular sort
+        titles = [i['title'] for i in popular]
+        self.assertLess(titles.index('불편한 편의점'), titles.index('소년이 온다'))  # 3 requests beat 1 despite lower score
+        self.assertEqual(titles[:2], ['불편한 편의점', '소년이 온다'])
+        self.assertEqual([i['requestCount'] for i in popular[:2]], [3, 1])
 
     def test_state_owned_rejected_and_purchased_ownership(self):
         owned = self.search(q='페인트')['items'][0]
@@ -127,11 +145,10 @@ class BookRouteTests(AppCase):
     def test_fixture_refused_outside_debug(self):
         from flask import Flask
         from app.books.sources import configure_sources
-        import os
         app = Flask(__name__)
         app.debug = False
-        os.environ['BOOK_PROVIDER'] = os.environ['LIBRARY_CATALOG'] = 'fixture'
-        try:
+        # Environment changes live only inside this block and are restored even if an assertion fails.
+        with patch.dict(os.environ, {'BOOK_PROVIDER': 'fixture', 'LIBRARY_CATALOG': 'fixture'}):
             configure_sources(app)
             self.assertIsNone(app.config['BOOK_PROVIDER'])
             self.assertIsNone(app.config['LIBRARY_CATALOG'])
@@ -139,12 +156,54 @@ class BookRouteTests(AppCase):
             app.config.update(BOOK_PROVIDER=None, LIBRARY_CATALOG=None)
             configure_sources(app)
             self.assertIsNotNone(app.config['BOOK_PROVIDER'])
-            os.environ['BOOK_PROVIDER'] = 'dls'
-            app.config['BOOK_PROVIDER'] = None
-            with self.assertRaises(RuntimeError):
-                configure_sources(app)
-        finally:
-            del os.environ['BOOK_PROVIDER'], os.environ['LIBRARY_CATALOG']
+            with patch.dict(os.environ, {'BOOK_PROVIDER': 'dls'}):
+                app.config['BOOK_PROVIDER'] = None
+                with self.assertRaises(RuntimeError):
+                    configure_sources(app)
+
+
+    def test_detail_falls_back_to_the_catalogue_when_the_provider_fails(self):
+        class Failing:
+            def __init__(self, exc): self.exc = exc
+            def search(self, *a): raise self.exc()
+            def get(self, *a): raise self.exc()
+        for exc, status, code in ((ProviderTimeout, 504, 'BOOK_PROVIDER_TIMEOUT'), (ProviderError, 502, 'BOOK_PROVIDER_ERROR')):
+            self.app.config['BOOK_PROVIDER'] = Failing(exc)
+            owned = self.call('s1', 'get', f'/api/books/{PAINT}')  # the school catalogue knows this book
+            self.assertEqual((owned.status_code, owned.get_json()['id'], owned.get_json()['owned']), (200, PAINT, True))
+            missing = self.call('s1', 'get', f'/api/books/{SOSEON}')  # catalogue has no such book: the original provider error
+            self.assertEqual((missing.status_code, missing.get_json()['error']['code']), (status, code))
+
+    def test_search_reads_every_provider_page(self):
+        def isbn(n):
+            body = f'978{n:09d}'
+            check = (10 - sum(int(c) * (1 if i % 2 == 0 else 3) for i, c in enumerate(body)) % 10) % 10
+            return body + str(check)
+        rows = [{'isbn': isbn(n), 'title': f'책 {n:03d}', 'author': '저자', 'publisher': '출판사', 'pub_date': '2020-01-01', 'price': 1000,
+                 'owned': False, 'description': ''} for n in range(250)]
+        pages = []
+        class Paged(FixtureProvider):
+            def search(self, query, page, page_size):
+                pages.append((page, page_size))
+                start = (page - 1) * page_size
+                return {'items': [dict(r, cover_url=None) for r in self.rows[start:start + page_size]], 'page': page, 'total': len(self.rows)}
+        self.app.config['BOOK_PROVIDER'] = Paged(rows)
+        self.app.config['LIBRARY_CATALOG'] = None  # only provider hits count in this test
+        body = self.search(q='책', pageSize=100)
+        self.assertEqual(pages, [(1, 100), (2, 100), (3, 100)])  # every page was read
+        self.assertEqual(body['total'], 250)
+        self.assertEqual(self.search(q='책', pageSize=100, page=3)['items'][-1]['title'], '책 249')
+        # De-duplicated across pages, and the all-words rule still applies to later pages.
+        self.assertEqual(self.search(q='책 249')['total'], 1)
+        # The 24-book fixture still ends after the first page.
+        pages.clear()
+        self.app.config['BOOK_PROVIDER'] = FixtureProvider()
+        self.app.config['LIBRARY_CATALOG'] = fixture_catalog()
+        calls = []
+        real = FixtureProvider.search
+        with patch.object(FixtureProvider, 'search', autospec=True, side_effect=lambda self, q, p, n: (calls.append(p), real(self, q, p, n))[1]):
+            self.search(q='책')
+        self.assertEqual(calls, [1])
 
 
 if __name__ == '__main__':

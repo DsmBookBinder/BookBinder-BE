@@ -1,7 +1,7 @@
 """Student requests and notifications (FE db.ts requestBook / cancelRequest / notifications)."""
 from flask import Blueprint, current_app, g, request
 from sqlalchemy import func, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from app.db import db
 from app.books import service
 from app.books.isbn import normalize_isbn
@@ -13,6 +13,8 @@ from app.serializers import book_out, ms, request_out, review_out
 
 requests_api = Blueprint('student_requests', __name__, url_prefix='/api')
 STATUSES = ('pending', 'approved', 'rejected', 'purchased')
+MAX_ATTEMPTS = 3
+MYSQL_DEADLOCK = 1213
 
 
 def user():
@@ -33,6 +35,12 @@ def authorize(student=False, csrf=False):
     if csrf and getattr(g, 'csrf_valid', False) is not True:
         return fail(CSRF_FAILED)
     return None
+
+
+def is_deadlock(exc):
+    """MySQL picked this transaction as the deadlock victim (error 1213): nothing was committed, so it is safe to retry."""
+    args = getattr(exc.orig, 'args', ())
+    return bool(args) and args[0] == MYSQL_DEADLOCK
 
 
 class Rejected(Exception):
@@ -101,16 +109,19 @@ def create_request():
         return error('VALIDATION_ERROR', '도서 정보를 확인해 주세요.', 400)
     uid = field(user(), 'id')
     try:
-        try:
-            return create_once(isbn, uid)
-        except IntegrityError:
-            # Another request created the same book/request concurrently: retry once on committed state.
-            db.session.rollback()
+        for attempt in range(1, MAX_ATTEMPTS + 1):
             try:
                 return create_once(isbn, uid)
             except IntegrityError:
+                # Another request created the same book/request concurrently: retry on committed state.
                 db.session.rollback()
-                return error('DUPLICATE_REQUEST', '이미 신청한 도서예요.', 409)
+                if attempt == MAX_ATTEMPTS:
+                    return error('DUPLICATE_REQUEST', '이미 신청한 도서예요.', 409)
+            except OperationalError as exc:
+                # Two first-time requests for the same ISBN can deadlock on the book row's gap lock.
+                db.session.rollback()
+                if not is_deadlock(exc) or attempt == MAX_ATTEMPTS:
+                    raise
     except Rejected as exc:
         db.session.rollback()
         return exc.response
@@ -150,7 +161,12 @@ def cancel_request(request_id):
     target = db.session.get(BookRequest, request_id)
     if target is None or target.user_id != field(user(), 'id'):
         return error('NOT_FOUND', '신청 내역을 찾을 수 없어요.', 404)
-    book = db.session.execute(select(RequestedBook).where(RequestedBook.id == target.requested_book_id).with_for_update()).scalar_one()
+    book = db.session.execute(select(RequestedBook).where(RequestedBook.id == target.requested_book_id).with_for_update()
+                              .execution_options(populate_existing=True)).scalar_one()
+    # The same request may have been cancelled while we waited for the lock.
+    if db.session.execute(select(BookRequest.id).where(BookRequest.id == request_id).with_for_update()).first() is None:
+        db.session.rollback()
+        return error('NOT_FOUND', '신청 내역을 찾을 수 없어요.', 404)
     if book.status != 'pending':
         db.session.rollback()
         return error('STATE_CONFLICT', '대기 중인 신청만 취소할 수 있어요.', 409)
@@ -158,8 +174,9 @@ def cancel_request(request_id):
     db.session.execute(update(Notification).where(Notification.request_id == target.id).values(request_id=None))
     db.session.delete(target)
     db.session.flush()
-    remaining = db.session.scalar(select(func.count(BookRequest.id)).where(BookRequest.requested_book_id == book.id))
-    if remaining == 0:
+    # Locking read: a plain COUNT would use the older snapshot and miss a concurrent cancel.
+    remaining = db.session.execute(select(BookRequest.id).where(BookRequest.requested_book_id == book.id).with_for_update()).all()
+    if not remaining:
         # Last requester left: the book drops off the librarian list. Row and price are kept.
         book.status, book.reject_reason, book.quantity, book.updated_at = 'pending', None, 1, utcnow()
     db.session.commit()
@@ -178,7 +195,9 @@ def notification_out(item):
 def list_notifications():
     denied = authorize()
     if denied: return denied
-    unread = request.args.get('unreadOnly', 'false')
+    # unreadOnly is the contract key. The old snake_case key is still accepted during the transition and
+    # will be removed in the release after the FE ships unreadOnly (documented in openapi.yaml).
+    unread = request.args.get('unreadOnly', request.args.get('unread_only', 'false'))
     if unread not in ('true', 'false'):
         return error('VALIDATION_ERROR', '읽음 조건을 확인해 주세요.', 400)
     uid = field(user(), 'id')

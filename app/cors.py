@@ -16,7 +16,6 @@ def apply(response, origin):
     response.headers['Access-Control-Allow-Origin'] = origin
     response.headers['Access-Control-Allow-Credentials'] = 'true'
     response.headers['Access-Control-Expose-Headers'] = 'Content-Disposition'
-    response.vary.add('Origin')
     return response
 
 
@@ -34,11 +33,12 @@ def preflight():
 
 
 def add_headers(response):
+    # Vary: Origin on every response (with or without an Origin header) so shared caches never reuse a
+    # CORS-decorated response for another origin. Allow-Origin itself is sent only on an exact allow-list match.
+    response.vary.add('Origin')
     origin = allowed_origin()
     if origin is not None:
         apply(response, origin)
-    elif request.headers.get('Origin') and current_app.config.get('CORS_ORIGINS'):
-        response.vary.add('Origin')
     return response
 
 

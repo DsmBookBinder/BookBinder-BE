@@ -1,6 +1,7 @@
 """Shared book request tables. User authentication is owned by the auth domain."""
 from datetime import datetime, timezone
 from sqlalchemy import CheckConstraint, UniqueConstraint
+from sqlalchemy.dialects.mysql import DATETIME as MYSQL_DATETIME
 from app.db import db
 
 
@@ -72,6 +73,7 @@ class ReviewLog(db.Model):
     requested_book_id = db.Column(db.BigInteger, db.ForeignKey('requested_books.id'), nullable=False, index=True)
     status = db.Column(db.String(16), nullable=False)
     actor_id = db.Column(db.BigInteger, db.ForeignKey('users.id'), nullable=False, index=True)
-    created_at = db.Column(db.DateTime, nullable=False, default=utcnow, index=True)
+    # DATETIME(6) on MySQL (migration 003) so week-boundary counts keep fractional seconds.
+    created_at = db.Column(db.DateTime().with_variant(MYSQL_DATETIME(fsp=6), 'mysql'), nullable=False, default=utcnow, index=True)
     book = db.relationship(RequestedBook)
     __table_args__ = (CheckConstraint("status IN ('approved','rejected','purchased')", name='ck_review_log_status'),)

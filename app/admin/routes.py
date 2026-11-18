@@ -44,6 +44,16 @@ def unexpected_error(exc):
     return fail(INTERNAL)
 
 
+def optional_json_body():
+    """No body -> {} (defaults). A body that is not a JSON object is rejected, never treated as 'no filter'."""
+    if not request.get_data(cache=True).strip():
+        return {}
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        raise services.APIError()
+    return body
+
+
 def download(rows, header, widths, prefix):
     filename = f'{prefix}_{kst_now().strftime("%Y%m%d")}.xlsx'
     # werkzeug adds filename*=UTF-8''... for the non-ASCII name.
@@ -77,7 +87,7 @@ def quantity(book_id):
 
 @admin_api.post('/books/export')
 def export_books():
-    return download(services.export_books(request.get_json(silent=True) or {}), BOOK_HEADER, BOOK_WIDTHS, '신청도서목록')
+    return download(services.export_books(optional_json_body()), BOOK_HEADER, BOOK_WIDTHS, '신청도서목록')
 
 
 @admin_api.get('/budget')
@@ -87,7 +97,7 @@ def budget():
 
 @admin_api.post('/budget/export')
 def export_budget():
-    return download(services.budget_export(request.get_json(silent=True) or {}), BUDGET_HEADER, BUDGET_WIDTHS, '예상예산')
+    return download(services.budget_export(optional_json_body()), BUDGET_HEADER, BUDGET_WIDTHS, '예상예산')
 
 
 @admin_api.get('/summary')

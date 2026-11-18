@@ -60,7 +60,10 @@ class RequestTests(AppCase):
         self.assertEqual(self.set_status(SOSEON, 'approved').get_json()['changed'], 1)
         for key in ('s1', 's2'):
             self.assertEqual(self.call(key, 'get', '/api/me/requests').get_json()['items'][0]['status'], 'approved')
-        self.assertEqual(db.session.query(Notification).count(), 2)
+        # One notification per requester (checked by user, not just by a total).
+        for key in ('s1', 's2'):
+            mine = db.session.query(Notification).filter_by(user_id=self.users[key]).all()
+            self.assertEqual([(n.type, n.requested_book_id is not None) for n in mine], [('approved', True)], key)
         self.assertEqual(db.session.query(ReviewLog).count(), 1)
         # A new requester joins an already approved book and sees its current state (FE keeps the review).
         self.assertEqual(self.request_book('s3').get_json()['review']['status'], 'approved')
@@ -89,7 +92,9 @@ class RequestTests(AppCase):
         self.request_book('s1', MODEUN)
         self.call('lib', 'patch', f'/api/admin/books/{MODEUN}/price', json={'price': 12000})
         self.app.config['BOOK_PROVIDER'].rows[8]['price'] = 99999  # provider changes later
-        self.request_book('s2', MODEUN)
+        second = self.request_book('s2', MODEUN)
+        self.assertEqual(second.status_code, 201)
+        self.assertEqual(db.session.query(BookRequest).filter_by(user_id=self.users['s2']).count(), 1)  # the request really was saved
         self.assertEqual(db.session.query(RequestedBook).one().price, 12000)
 
     def test_cancel_rules(self):
@@ -156,13 +161,107 @@ class RequestTests(AppCase):
         nid = self.call('s1', 'get', '/api/me/notifications').get_json()['items'][0]['id']
         self.assertEqual(self.call('s2', 'patch', f'/api/me/notifications/{nid}/read').status_code, 404)
 
-    def test_concurrent_duplicate_is_conflict_not_500(self):
+    def test_integrity_error_on_first_try_is_retried_for_real(self):
         from unittest.mock import patch
         from sqlalchemy.exc import IntegrityError
         from app.requests import routes
+        real = routes.create_once
+        calls = []
+        def flaky(isbn, uid):
+            calls.append(1)
+            if len(calls) == 1:
+                raise IntegrityError('x', {}, Exception())  # only the first call fails
+            return real(isbn, uid)
         self.request_book('s1')
-        with patch.object(routes, 'create_once', side_effect=IntegrityError('x', {}, Exception())):
+        with patch.object(routes, 'create_once', side_effect=flaky):
+            response = self.request_book('s2')
+        self.assertEqual((response.status_code, len(calls)), (201, 2))
+        self.assertEqual(db.session.query(BookRequest).filter_by(user_id=self.users['s2']).count(), 1)
+
+    def test_same_student_duplicate_after_integrity_error_is_409(self):
+        from unittest.mock import patch
+        from sqlalchemy.exc import IntegrityError
+        from app.requests import routes
+        real = routes.create_once
+        calls = []
+        def flaky(isbn, uid):
+            calls.append(1)
+            if len(calls) == 1:
+                raise IntegrityError('x', {}, Exception())
+            return real(isbn, uid)
+        self.request_book('s1')
+        with patch.object(routes, 'create_once', side_effect=flaky):
+            self.assertEqual(self.error(self.request_book('s1'), 409, 'DUPLICATE_REQUEST'), '이미 신청한 도서예요.')
+        self.assertEqual(db.session.query(BookRequest).filter_by(user_id=self.users['s1']).count(), 1)
+
+    def test_persistent_integrity_error_ends_as_conflict_not_500(self):
+        from unittest.mock import patch
+        from sqlalchemy.exc import IntegrityError
+        from app.requests import routes
+        with patch.object(routes, 'create_once', side_effect=IntegrityError('x', {}, Exception())) as mocked:
             self.assertEqual(self.error(self.request_book('s2'), 409, 'DUPLICATE_REQUEST'), '이미 신청한 도서예요.')
+        self.assertEqual(mocked.call_count, routes.MAX_ATTEMPTS)
+
+    def deadlock(self, code=1213):
+        from sqlalchemy.exc import OperationalError
+        return OperationalError('stmt', {}, Exception(code, 'Deadlock found when trying to get lock'))
+
+    def test_deadlock_is_rolled_back_and_retried(self):
+        from unittest.mock import patch
+        from app.requests import routes
+        real = routes.create_once
+        calls = []
+        def deadlocked_once(isbn, uid):
+            calls.append(1)
+            if len(calls) == 1:
+                raise self.deadlock()
+            return real(isbn, uid)
+        with patch.object(routes, 'create_once', side_effect=deadlocked_once):
+            response = self.request_book('s1')
+        self.assertEqual((response.status_code, len(calls)), (201, 2))
+        self.assertEqual(db.session.query(BookRequest).count(), 1)
+
+    def test_deadlock_gives_up_after_the_attempt_limit_and_other_db_errors_are_not_retried(self):
+        from unittest.mock import patch
+        from app.requests import routes
+        self.app.config['PROPAGATE_EXCEPTIONS'] = False  # answer 500 like production instead of re-raising into the test client
+        with patch.object(routes, 'create_once', side_effect=self.deadlock()) as mocked:
+            self.assertEqual(self.request_book('s1').status_code, 500)
+        self.assertEqual(mocked.call_count, routes.MAX_ATTEMPTS)
+        with patch.object(routes, 'create_once', side_effect=self.deadlock(2003)) as mocked:
+            self.assertEqual(self.request_book('s1').status_code, 500)
+        self.assertEqual(mocked.call_count, 1)  # not a deadlock: no retry
+        self.assertEqual(db.session.query(BookRequest).count(), 0)
+
+    def test_cancel_counts_remaining_requests_with_a_locking_read(self):
+        from sqlalchemy import event
+        first = self.request_book('s1').get_json()['request']['id']
+        self.request_book('s2')
+        seen = []
+        def record(_conn, clause, _multi, _params, _options):
+            if getattr(clause, '_for_update_arg', None) is not None:
+                seen.append(clause.get_final_froms()[0].name)
+        event.listen(db.engine, 'before_execute', record)
+        try:
+            self.assertEqual(self.call('s1', 'delete', f'/api/me/requests/{first}').status_code, 204)
+        finally:
+            event.remove(db.engine, 'before_execute', record)
+        self.assertEqual(seen.count('book_requests'), 2)  # re-check of the request itself + the "remaining" read
+        self.assertEqual(db.session.query(RequestedBook).one().status, 'pending')
+        # Another requester remains, so the book keeps its state and quantity.
+        self.call('lib', 'patch', f'/api/admin/books/{SOSEON}/quantity', json={'quantity': 5})
+        last = db.session.query(BookRequest).one().id
+        self.assertEqual(self.call('s2', 'delete', f'/api/me/requests/{last}').status_code, 204)
+        self.assertEqual(db.session.query(RequestedBook).one().quantity, 1)  # last requester left: reset
+
+    def test_unread_only_old_key_is_accepted_during_the_transition(self):
+        self.request_book('s1')
+        self.set_status(SOSEON, 'approved')
+        self.assertEqual(len(self.call('s1', 'get', '/api/me/notifications?unread_only=true').get_json()['items']), 1)
+        self.call('s1', 'patch', '/api/me/notifications/read-all')
+        self.assertEqual(self.call('s1', 'get', '/api/me/notifications?unread_only=true').get_json()['items'], [])
+        # The contract key wins when both are sent.
+        self.assertEqual(len(self.call('s1', 'get', '/api/me/notifications?unreadOnly=false&unread_only=true').get_json()['items']), 1)
 
 
 if __name__ == '__main__':

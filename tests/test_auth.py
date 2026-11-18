@@ -56,7 +56,7 @@ class AuthTests(AppCase):
         response = self.signup(headers, loginId='ab', password='short', password2='other', name='  ', classNo='4-1', studentNo='1041')
         body = response.get_json()['error']
         self.assertEqual((response.status_code, body['code'], body['message']), (400, 'VALIDATION_ERROR', '가입 정보를 확인해 주세요.'))
-        self.assertEqual(body['fields'], {'name': '이름을 입력해 주세요.', 'loginId': '영문·숫자 4~20자로 입력해 주세요.', 'password': '8자 이상 입력해 주세요.',
+        self.assertEqual(body['fields'], {'name': '이름을 입력해 주세요.', 'loginId': '영문·숫자 4~20자로 입력해 주세요.', 'password': '8~128자로 입력해 주세요.',
                                          'password2': '비밀번호가 서로 달라요.', 'classNo': '2-3처럼 학년-반으로 입력해 주세요.', 'studentNo': '숫자 5자리 학번을 입력해 주세요.'})
 
     def test_signup_field_rules(self):
@@ -105,7 +105,8 @@ class AuthTests(AppCase):
             return client.patch('/api/me/password', json={'currentPassword': current, 'newPassword': new, **extra}, headers=headers)
         self.assertEqual(change('nope', 'newpassword1').get_json()['error']['code'], 'INVALID_PASSWORD')
         short = change('oldpassword', 'short')
-        self.assertEqual((short.status_code, short.get_json()['error']['message']), (400, '새 비밀번호는 8자 이상이어야 해요.'))
+        self.assertEqual((short.status_code, short.get_json()['error']['message']), (400, '새 비밀번호는 8~128자여야 해요.'))
+        self.assertEqual(short.get_json()['error']['fields'], {'newPassword': '새 비밀번호는 8~128자여야 해요.'})
         self.assertEqual(change('oldpassword', 'newpassword1', newPasswordConfirm='different').status_code, 400)
         self.assertEqual(change('oldpassword', 'newpassword1', newPasswordConfirm='newpassword1').status_code, 204)
         self.assertEqual(client.get('/api/me').status_code, 200)  # current session survives
@@ -116,16 +117,66 @@ class AuthTests(AppCase):
         self.assertEqual(fresh.post('/api/auth/login', json={'loginId': 'student1', 'password': 'newpassword1'}, headers=fresh_headers).status_code, 200)
         self.assertEqual(self.client.patch('/api/me/password', json={}).status_code, 401)
 
+    def test_concurrent_password_change_second_request_is_rejected(self):
+        # Two requests of the same session race: the first changes the password and removes the other sessions.
+        # The second runs after the first and must stop before touching the hash or the sessions.
+        from werkzeug.security import check_password_hash, generate_password_hash
+        user = db.session.get(User, self.users['s1'])
+        user.password_hash = generate_password_hash('oldpassword')
+        db.session.commit()
+        winner, winner_headers = self.as_user('s1')
+        loser = self.app.test_client()
+        loser_csrf = self.csrf_for(loser)
+        loser_headers = {'X-CSRF-Token': loser.post('/api/auth/login', json={'loginId': 'student1', 'password': 'oldpassword'}, headers=loser_csrf).get_json()['csrfToken']}
+        first = winner.patch('/api/me/password', json={'currentPassword': 'oldpassword', 'newPassword': 'newpassword1'}, headers=winner_headers)
+        self.assertEqual(first.status_code, 204)
+        # The loser's session was deleted by the first change, so its request ends before the hash update.
+        second = loser.patch('/api/me/password', json={'currentPassword': 'newpassword1', 'newPassword': 'otherpassword2'}, headers=loser_headers)
+        self.assertEqual(second.status_code, 401)
+        db.session.expire_all()
+        self.assertTrue(check_password_hash(db.session.get(User, self.users['s1']).password_hash, 'newpassword1'))
+        self.assertEqual(winner.get('/api/me').status_code, 200)  # the session of the request that finished first remains
+
+    def test_password_change_locks_account_row_before_session_row(self):
+        # SQLite ignores FOR UPDATE, so check the statements that were built: login and password change both
+        # lock the users row, and the change locks the caller's session row after it.
+        from sqlalchemy import event
+        from werkzeug.security import generate_password_hash
+        db.session.get(User, self.users['s1']).password_hash = generate_password_hash('oldpassword')
+        db.session.commit()
+        client, headers = self.as_user('s1')
+        locked = []
+        def record(_conn, clause, _multi, _params, _options):
+            arg = getattr(clause, '_for_update_arg', None)
+            if arg is not None:
+                locked.append(clause.get_final_froms()[0].name)
+        event.listen(db.engine, 'before_execute', record)
+        try:
+            self.assertEqual(client.patch('/api/me/password', json={'currentPassword': 'oldpassword', 'newPassword': 'newpassword1'}, headers=headers).status_code, 204)
+            change = list(locked)
+            del locked[:]
+            fresh = self.app.test_client()
+            fresh.post('/api/auth/login', json={'loginId': 'student1', 'password': 'newpassword1'}, headers=self.csrf_for(fresh))
+        finally:
+            event.remove(db.engine, 'before_execute', record)
+        self.assertEqual(change, ['users', 'auth_sessions'])
+        self.assertEqual(locked, ['users'])
+
     def csrf_for(self, client):
         return {'X-CSRF-Token': client.get('/api/auth/csrf').get_json()['csrfToken']}
 
     def test_cors_exact_origin_only(self):
         allowed = self.client.get('/api/health', headers={'Origin': ORIGIN})
+        self.assertEqual(allowed.status_code, 200)  # the real /api/health route, not just a header check
         self.assertEqual(allowed.headers['Access-Control-Allow-Origin'], ORIGIN)
         self.assertEqual(allowed.headers['Access-Control-Allow-Credentials'], 'true')
         for origin in ('http://evil.example', 'http://localhost:5173.evil.example', 'http://localhost:5174'):
             self.assertNotIn('Access-Control-Allow-Origin', self.client.get('/api/health', headers={'Origin': origin}).headers)
-        self.assertNotIn('Access-Control-Allow-Origin', self.client.get('/api/health').headers)
+        no_origin = self.client.get('/api/health')
+        self.assertNotIn('Access-Control-Allow-Origin', no_origin.headers)
+        # Vary: Origin is on every response so caches never mix origins.
+        for response in (allowed, no_origin, self.client.get('/api/health', headers={'Origin': 'http://evil.example'})):
+            self.assertIn('Origin', response.headers['Vary'])
         pre = self.client.options('/api/admin/books', headers={'Origin': ORIGIN, 'Access-Control-Request-Method': 'POST'})
         self.assertEqual(pre.status_code, 204)
         self.assertEqual(pre.headers['Access-Control-Allow-Headers'], 'Content-Type, X-CSRF-Token')
