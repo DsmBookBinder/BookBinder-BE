@@ -1,3 +1,10 @@
+> **갱신(FE 동작 기준 계약 변경)**: 이 문서의 신청 단위 관리자 API(`/api/admin/requests*`)·snake_case·대문자 상태·발주 엑셀은
+> 제거·대체되었다. 현재 계약은 `openapi.yaml`과 `BACKEND_INTEGRATION.md`를 따른다.
+> 대체: `GET /api/admin/books`, `POST /api/admin/books/status`, `POST /api/admin/books/revert`, `PATCH /api/admin/books/{bookId}/price|quantity`,
+> `POST /api/admin/books/export`, `GET /api/admin/budget`, `POST /api/admin/budget/export`, `GET /api/admin/summary`.
+> 상태의 기준은 `requested_books.status`(도서 단위) 하나이며 migration 003이 신청별 상태를 합친다.
+> 발주용(APPROVED만, 학생 정보 없음) 엑셀이 별도로 필요한지는 팀 결정 사항이다. 아래는 이전 구현의 기록이다.
+
 # A 관리자 API 구현 및 계약 변경
 
 ## 입력과 완료 조건

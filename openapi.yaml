@@ -1,613 +1,394 @@
-{
-  "openapi": "3.0.3",
-  "info": {
-    "title": "BookBinder Admin API",
-    "version": "1.0.0",
-    "description": "User-supplied admin contract; existing auth/student APIs are outside this document."
-  },
-  "security": [
-    {
-      "sessionCookie": []
-    }
-  ],
-  "paths": {
-    "/api/admin/requests": {
-      "get": {
-        "summary": "전체 신청 목록 및 필터",
-        "description": "One row per request. Price is the request-time snapshot. Descending requested_at/id. Count and budget across all requests require every page. Reversed dates return 400.",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "status",
-            "schema": {
-              "type": "string",
-              "enum": [
-                "PENDING",
-                "APPROVED",
-                "REJECTED",
-                "PURCHASED"
-              ]
-            },
-            "description": "Request status"
-          },
-          {
-            "in": "query",
-            "name": "from",
-            "schema": {
-              "type": "string",
-              "format": "date"
-            },
-            "description": "Inclusive 00:00 Asia/Seoul"
-          },
-          {
-            "in": "query",
-            "name": "to",
-            "schema": {
-              "type": "string",
-              "format": "date"
-            },
-            "description": "Exclusive next day 00:00 Asia/Seoul"
-          },
-          {
-            "in": "query",
-            "name": "student_no",
-            "schema": {
-              "type": "string"
-            },
-            "description": "Exact match"
-          },
-          {
-            "in": "query",
-            "name": "page",
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "default": 1
-            },
-            "description": "Page"
-          },
-          {
-            "in": "query",
-            "name": "page_size",
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 100,
-              "default": 20
-            },
-            "description": "Page size"
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Success",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "items": {
-                      "type": "array",
-                      "items": {
-                        "$ref": "#/components/schemas/Request"
-                      }
-                    },
-                    "page": {
-                      "type": "integer"
-                    },
-                    "page_size": {
-                      "type": "integer"
-                    },
-                    "total": {
-                      "type": "integer"
-                    }
-                  },
-                  "required": [
-                    "items",
-                    "page",
-                    "page_size",
-                    "total"
-                  ]
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "VALIDATION_ERROR",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "AUTH_REQUIRED",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "FORBIDDEN (write requests also CSRF_FAILED)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "INTERNAL_ERROR",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/admin/requests/{id}/status": {
-      "patch": {
-        "summary": "신청 상태 변경",
-        "description": "PENDING→APPROVED/REJECTED; APPROVED→PURCHASED. Conditional update detects stale expected_status. Status, actor, time and notification commit atomically; retries cannot duplicate notifications.",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9]+$",
-              "example": "42"
-            }
-          },
-          {
-            "in": "header",
-            "name": "X-CSRF-Token",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "Token bound to the authenticated server session."
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "status": {
-                    "type": "string",
-                    "enum": [
-                      "PENDING",
-                      "APPROVED",
-                      "REJECTED",
-                      "PURCHASED"
-                    ]
-                  },
-                  "expected_status": {
-                    "type": "string",
-                    "enum": [
-                      "PENDING",
-                      "APPROVED",
-                      "REJECTED",
-                      "PURCHASED"
-                    ]
-                  },
-                  "reason": {
-                    "type": "string",
-                    "maxLength": 500,
-                    "description": "Trimmed 1–500 characters required for REJECTED; cleared otherwise.",
-                    "nullable": true
-                  }
-                },
-                "required": [
-                  "status",
-                  "expected_status"
-                ]
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Success",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/StateChange"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "VALIDATION_ERROR",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "AUTH_REQUIRED",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "FORBIDDEN (write requests also CSRF_FAILED)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "INTERNAL_ERROR",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "NOT_FOUND",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "STATE_CONFLICT",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/admin/requests/export": {
-      "post": {
-        "summary": "발주용 엑셀 추출",
-        "description": "Deduplicate request_ids then require 1–1000 distinct IDs and reread DB. All must be APPROVED with known consistent ISBN prices. group_by_isbn=true emits one row per non-null ISBN; false emits one per request. NULL ISBN requests always remain separate. Quantity is 1. Columns: 도서명/저자/출판사/ISBN/정가/수량. ISBN/text are literal strings, prices numeric. No student information, state changes or persistent files.",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "X-CSRF-Token",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "Token bound to the authenticated server session."
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "request_ids": {
-                    "type": "array",
-                    "minItems": 1,
-                    "items": {
-                      "type": "string",
-                      "pattern": "^[0-9]+$",
-                      "example": "42"
-                    },
-                    "description": "Maximum 1000 after deduplication; more returns 413."
-                  },
-                  "group_by_isbn": {
-                    "type": "boolean"
-                  }
-                },
-                "required": [
-                  "request_ids",
-                  "group_by_isbn"
-                ]
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "XLSX workbook",
-            "headers": {
-              "Content-Disposition": {
-                "schema": {
-                  "type": "string"
-                },
-                "example": "attachment; filename=\"BookBinder_orders_20260923.xlsx\""
-              }
-            },
-            "content": {
-              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": {
-                "schema": {
-                  "type": "string",
-                  "format": "binary"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "VALIDATION_ERROR",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "AUTH_REQUIRED",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "FORBIDDEN (write requests also CSRF_FAILED)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "INTERNAL_ERROR",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "NOT_FOUND",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "EXPORT_REVIEW_REQUIRED",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "413": {
-            "description": "PAYLOAD_TOO_LARGE",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  },
-  "components": {
-    "securitySchemes": {
-      "sessionCookie": {
-        "type": "apiKey",
-        "in": "cookie",
-        "name": "bookbinder_session",
-        "description": "Authenticated librarian session required."
-      }
-    },
-    "schemas": {
-      "User": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string",
-            "pattern": "^[0-9]+$",
-            "example": "42"
-          },
-          "name": {
-            "type": "string"
-          },
-          "grade_class": {
-            "type": "string",
-            "nullable": true
-          },
-          "student_no": {
-            "type": "string",
-            "nullable": true
-          }
-        },
-        "required": [
-          "id",
-          "name",
-          "grade_class",
-          "student_no"
-        ]
-      },
-      "Request": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string",
-            "pattern": "^[0-9]+$",
-            "example": "42"
-          },
-          "status": {
-            "type": "string",
-            "enum": [
-              "PENDING",
-              "APPROVED",
-              "REJECTED",
-              "PURCHASED"
-            ]
-          },
-          "reject_reason": {
-            "type": "string",
-            "maxLength": 500,
-            "nullable": true
-          },
-          "processed_by": {
-            "type": "string",
-            "pattern": "^[0-9]+$",
-            "example": "42",
-            "nullable": true
-          },
-          "processed_at": {
-            "type": "string",
-            "format": "date-time",
-            "nullable": true
-          },
-          "user": {
-            "$ref": "#/components/schemas/User"
-          },
-          "isbn": {
-            "type": "string",
-            "nullable": true
-          },
-          "title": {
-            "type": "string"
-          },
-          "author": {
-            "type": "string"
-          },
-          "publisher": {
-            "type": "string"
-          },
-          "price": {
-            "type": "integer",
-            "minimum": 0,
-            "nullable": true
-          },
-          "requested_at": {
-            "type": "string",
-            "format": "date-time"
-          }
-        },
-        "required": [
-          "id",
-          "status",
-          "reject_reason",
-          "processed_by",
-          "processed_at",
-          "user",
-          "isbn",
-          "title",
-          "author",
-          "publisher",
-          "price",
-          "requested_at"
-        ]
-      },
-      "StateChange": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string",
-            "pattern": "^[0-9]+$",
-            "example": "42"
-          },
-          "status": {
-            "type": "string",
-            "enum": [
-              "PENDING",
-              "APPROVED",
-              "REJECTED",
-              "PURCHASED"
-            ]
-          },
-          "reject_reason": {
-            "type": "string",
-            "maxLength": 500,
-            "nullable": true
-          },
-          "processed_by": {
-            "type": "string",
-            "pattern": "^[0-9]+$",
-            "example": "42",
-            "nullable": true
-          },
-          "processed_at": {
-            "type": "string",
-            "format": "date-time",
-            "nullable": true
-          }
-        },
-        "required": [
-          "id",
-          "status",
-          "reject_reason",
-          "processed_by",
-          "processed_at"
-        ]
-      },
-      "Error": {
-        "type": "object",
-        "properties": {
-          "error": {
-            "type": "object",
-            "properties": {
-              "code": {
-                "type": "string"
-              },
-              "message": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "code",
-              "message"
-            ]
-          }
-        },
-        "required": [
-          "error"
-        ]
-      }
-    }
-  }
-}
+openapi: 3.0.3
+info:
+  title: BookBinder API
+  version: 2.0.0
+  description: |
+    FE(BookBinder-FE) 동작 기준 계약. 키는 camelCase, 상태·역할은 소문자, 시간은 UTC epoch 밀리초 정수, 모든 id는 문자열이다.
+    도서의 id는 정규화된 ISBN-13이다. 처리 상태는 도서 단위(requested_books.status)이며 한 책을 신청한 모든 학생에게 같이 적용된다.
+    쓰기 요청(POST/PATCH/DELETE)은 X-CSRF-Token 헤더가 필요하다. 날짜 경계는 Asia/Seoul 기준이다.
+    오류 형식: {"error": {"code", "message", "fields"?}} — fields는 필드(camelCase)별 메시지.
+security:
+  - sessionCookie: []
+paths:
+  /api/auth/csrf:
+    get:
+      summary: CSRF 토큰 발급(세션이 없으면 익명 세션 쿠키 생성)
+      security: []
+      responses:
+        '200': {description: OK, content: {application/json: {schema: {type: object, properties: {csrfToken: {type: string}}, required: [csrfToken]}}}}
+  /api/auth/signup:
+    post:
+      summary: 학생 가입(공개 가입은 학생 전용, role 키는 400)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                loginId: {type: string, description: 'trim 후 ^[a-zA-Z0-9]{4,20}$ (소문자로 저장)'}
+                password: {type: string, minLength: 8, maxLength: 128}
+                password2: {type: string, description: 있으면 password와 같아야 한다}
+                name: {type: string, maxLength: 50}
+                classNo: {type: string, description: 'trim 후 ^[1-3]-[0-9]{1,2}$ 예) 2-3'}
+                studentNo: {type: string, description: '^[0-9]{5}$ (trim 없음)'}
+              required: [loginId, password, name, classNo, studentNo]
+      responses:
+        '201': {description: 가입 완료(로그인되지 않음), content: {application/json: {schema: {$ref: '#/components/schemas/User'}}}}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '409': {description: 'DUPLICATE_LOGIN_ID — 이미 사용 중인 아이디예요.', content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /api/auth/login:
+    post:
+      summary: 로그인(새 세션 쿠키 + 새 CSRF 토큰)
+      security: []
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: false, properties: {loginId: {type: string}, password: {type: string}}, required: [loginId, password]}}}
+      responses:
+        '200': {description: OK, content: {application/json: {schema: {type: object, properties: {user: {$ref: '#/components/schemas/User'}, csrfToken: {type: string}}, required: [user, csrfToken]}}}}
+        '401': {description: INVALID_CREDENTIALS, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /api/auth/logout:
+    post:
+      summary: 로그아웃(세션이 이미 없어도 204)
+      security: []
+      responses:
+        '204': {description: 로그아웃됨}
+  /api/me:
+    get:
+      summary: 내 정보
+      responses:
+        '200': {description: OK, content: {application/json: {schema: {$ref: '#/components/schemas/User'}}}}
+        '401': {$ref: '#/components/responses/AuthRequired'}
+    patch:
+      summary: 정보 수정(학생은 name·classNo·studentNo 세 값 모두, 사서는 name만)
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {name: {type: string}, classNo: {type: string}, studentNo: {type: string}}}}}
+      responses:
+        '200': {description: OK, content: {application/json: {schema: {$ref: '#/components/schemas/User'}}}}
+        '400': {$ref: '#/components/responses/ValidationError'}
+  /api/me/password:
+    patch:
+      summary: 비밀번호 변경(현재 세션을 뺀 다른 세션은 삭제)
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {currentPassword: {type: string}, newPassword: {type: string, minLength: 8, maxLength: 128}, newPasswordConfirm: {type: string}}, required: [currentPassword, newPassword]}}}
+      responses:
+        '204': {description: 변경됨}
+        '400': {description: 'VALIDATION_ERROR 또는 INVALID_PASSWORD(현재 비밀번호가 맞지 않아요.)', content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /api/books:
+    get:
+      summary: 도서 검색(검색어 없이도 가능)
+      parameters:
+        - {in: query, name: q, schema: {type: string, maxLength: 100}, description: 공백으로 나눈 모든 단어가 들어 있어야 한다}
+        - {in: query, name: scope, schema: {type: string, enum: [all, owned], default: all}}
+        - {in: query, name: sort, schema: {type: string, enum: [relevance, popular], default: relevance}}
+        - {in: query, name: page, schema: {type: integer, minimum: 1, default: 1}}
+        - {in: query, name: pageSize, schema: {type: integer, minimum: 1, maximum: 100, default: 5}}
+      responses:
+        '200': {description: OK, content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: '#/components/schemas/SearchItem'}}, page: {type: integer}, pageSize: {type: integer}, total: {type: integer}}, required: [items, page, pageSize, total]}}}}
+        '503': {description: '도서 공급자 없음/오류(BOOK_PROVIDER_UNAVAILABLE 503, _ERROR 502, _TIMEOUT 504)', content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /api/books/popular:
+    get:
+      summary: 소장하지 않은 책 중 신청이 많은 순
+      parameters:
+        - {in: query, name: limit, schema: {type: integer, minimum: 1, maximum: 50, default: 5}}
+      responses:
+        '200': {description: OK, content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {type: object, properties: {book: {$ref: '#/components/schemas/Book'}, count: {type: integer}}}}}}}}}
+  /api/books/{bookId}:
+    get:
+      summary: 도서 상세(bookId = ISBN-10/13, 하이픈 허용)
+      parameters:
+        - {in: path, name: bookId, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SearchItem'
+                  - type: object
+                    properties:
+                      review: {type: object, nullable: true, properties: {status: {$ref: '#/components/schemas/Status'}, reason: {type: string}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/requests:
+    post:
+      summary: 도서 신청(학생). 기존 {isbn} 키도 받는다
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {bookId: {type: string}}, required: [bookId]}}}
+      responses:
+        '201': {description: 신청됨, content: {application/json: {schema: {type: object, properties: {request: {$ref: '#/components/schemas/BookRequest'}, review: {$ref: '#/components/schemas/Review'}}}}}}
+        '409': {description: 'OWNED_BOOK / DUPLICATE_REQUEST / REJECTED_BOOK(다른 학생의 신청이 반려된 책 포함)', content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '503': {description: 공급자 또는 소장 목록 확인 불가(LIBRARY_CATALOG_UNAVAILABLE 포함), content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /api/me/requests:
+    get:
+      summary: 내 신청 목록(전체, createdAt 내림차순). status·reason은 도서 상태
+      parameters:
+        - {in: query, name: status, schema: {$ref: '#/components/schemas/Status'}}
+      responses:
+        '200': {description: OK, content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {type: object, properties: {request: {$ref: '#/components/schemas/BookRequest'}, book: {$ref: '#/components/schemas/Book'}, status: {$ref: '#/components/schemas/Status'}, reason: {type: string}}}}}}}}}
+  /api/me/requests/{id}:
+    delete:
+      summary: 신청 취소(도서 상태가 pending일 때만)
+      parameters:
+        - {in: path, name: id, required: true, schema: {type: string}}
+      responses:
+        '204': {description: 취소됨(마지막 신청자면 사서 목록·예산에서 빠진다. 책 행·가격은 유지)}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {description: 'STATE_CONFLICT — 대기 중인 신청만 취소할 수 있어요.', content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /api/me/notifications:
+    get:
+      summary: 내 알림(전체, createdAt 내림차순)
+      parameters:
+        - {in: query, name: unreadOnly, schema: {type: string, enum: ['true', 'false'], default: 'false'}}
+      responses:
+        '200': {description: OK, content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: '#/components/schemas/Notification'}}, unreadCount: {type: integer}}}}}}
+  /api/me/notifications/read-all:
+    patch:
+      summary: 내 알림 모두 읽음(멱등)
+      responses:
+        '200': {description: OK, content: {application/json: {schema: {type: object, properties: {updated: {type: integer}}}}}}
+  /api/me/notifications/{id}/read:
+    patch:
+      summary: 알림 읽음(멱등)
+      parameters:
+        - {in: path, name: id, required: true, schema: {type: string}}
+      responses:
+        '200': {description: OK, content: {application/json: {schema: {type: object, properties: {id: {type: string}, read: {type: boolean}}}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/admin/books:
+    get:
+      summary: 신청 도서 목록(신청이 1건 이상인 책 1권 = 1행, 사서 전용)
+      description: 필터는 서로 독립이며 FE matches()와 같다. 페이지가 범위를 넘으면 마지막 페이지로 맞춘다.
+      parameters:
+        - {in: query, name: status, schema: {$ref: '#/components/schemas/Status'}}
+        - {in: query, name: classNo, schema: {type: string}, description: 신청 학생 중 한 명이라도 그 학년/반이면 포함}
+        - {in: query, name: from, schema: {type: string, format: date}, description: '신청 중 한 건이라도 KST from 00:00:00.000 이후'}
+        - {in: query, name: to, schema: {type: string, format: date}, description: 'KST to 23:59:59.999 이전. from > to 는 400'}
+        - {in: query, name: q, schema: {type: string}, description: 제목+저자+신청 학생 이름·학번을 공백으로 이은 문자열의 부분 문자열(대소문자 무시)}
+        - {in: query, name: sort, schema: {type: string, enum: [latest, count, title], default: latest}}
+        - {in: query, name: page, schema: {type: integer, minimum: 1, default: 1}}
+        - {in: query, name: pageSize, schema: {type: integer, minimum: 1, maximum: 100, default: 6}}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: {type: array, items: {$ref: '#/components/schemas/BookRow'}}
+                  page: {type: integer}
+                  pageSize: {type: integer}
+                  total: {type: integer}
+                  summary: {type: object, description: 필터와 무관한 전체 책 기준, properties: {total: {type: integer}, pending: {type: integer}, approved: {type: integer}, rejected: {type: integer}, purchased: {type: integer}}}
+                  classOptions: {type: array, items: {type: string}}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/admin/books/status:
+    post:
+      summary: '상태 일괄 변경. 전이: approved/rejected ← pending, purchased ← approved. 안 되는 책은 건너뛴다'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                bookIds: {type: array, items: {type: string}, minItems: 1, maxItems: 1000}
+                status: {type: string, enum: [approved, rejected, purchased]}
+                reason: {type: string, minLength: 1, maxLength: 500, description: rejected일 때 필수(trim 후). 다른 상태에서는 무시}
+              required: [bookIds, status]
+      responses:
+        '200': {description: 'changed = 실제로 바뀐 책 수. 책마다 알림(신청 학생 전원)·처리 내역 1건', content: {application/json: {schema: {$ref: '#/components/schemas/ChangeResult'}}}}
+        '400': {$ref: '#/components/responses/ValidationError'}
+  /api/admin/books/revert:
+    post:
+      summary: 되돌리기(approved/rejected → pending, purchased → approved). 알림·처리 내역을 만들지 않는다
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {bookIds: {type: array, items: {type: string}, minItems: 1, maxItems: 1000}}, required: [bookIds]}}}
+      responses:
+        '200': {description: OK, content: {application/json: {schema: {$ref: '#/components/schemas/ChangeResult'}}}}
+  /api/admin/books/{bookId}/price:
+    patch:
+      summary: 도서 가격 입력/수정(신청이 있는 책만)
+      parameters:
+        - {in: path, name: bookId, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {price: {type: integer, minimum: 0, nullable: true}}, required: [price]}}}
+      responses:
+        '200': {description: OK, content: {application/json: {schema: {$ref: '#/components/schemas/Book'}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/admin/books/{bookId}/quantity:
+    patch:
+      summary: 구매 수량(유한한 숫자는 내림, 음수는 0)
+      parameters:
+        - {in: path, name: bookId, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {quantity: {type: number}}, required: [quantity]}}}
+      responses:
+        '200': {description: OK, content: {application/json: {schema: {$ref: '#/components/schemas/Review'}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/admin/books/export:
+    post:
+      summary: 신청 도서 목록 엑셀(필터·정렬 결과 전체). 파일명 신청도서목록_YYYYMMDD.xlsx
+      description: '열: 도서명, 저자, 출판사, ISBN, 가격, 신청 수, 신청 학생(이름(학년반)), 최근 신청일, 검토 결과, 구매 여부, 반려 사유. 학생 이름·학년반이 포함된다.'
+      requestBody:
+        content: {application/json: {schema: {type: object, properties: {status: {type: string}, classNo: {type: string}, from: {type: string}, to: {type: string}, q: {type: string}, sort: {type: string, enum: [latest, count, title]}}}}}
+      responses:
+        '200': {description: xlsx, content: {application/vnd.openxmlformats-officedocument.spreadsheetml.sheet: {schema: {type: string, format: binary}}}}
+  /api/admin/budget:
+    get:
+      summary: 예산
+      parameters:
+        - {in: query, name: period, schema: {type: string, enum: [semester, year, all], default: semester}}
+        - {in: query, name: include, schema: {type: string, default: 'pending,approved'}, description: 'pending,approved,rejected 중 쉼표 구분(빈 값 = 없음). purchased는 항상 따로 집계'}
+      responses:
+        '200': {description: OK, content: {application/json: {schema: {$ref: '#/components/schemas/Budget'}}}}
+  /api/admin/budget/export:
+    post:
+      summary: 예산 엑셀. 파일명 예상예산_YYYYMMDD.xlsx
+      requestBody:
+        content: {application/json: {schema: {type: object, properties: {period: {type: string, enum: [semester, year, all]}, include: {type: array, items: {type: string}}}}}}
+      responses:
+        '200': {description: xlsx, content: {application/vnd.openxmlformats-officedocument.spreadsheetml.sheet: {schema: {type: string, format: binary}}}}
+  /api/admin/summary:
+    get:
+      summary: 사서 처리 현황(마이페이지)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pending: {type: integer}
+                  weekApproved: {type: integer, description: '이번 주 월요일 00:00(KST) 이후'}
+                  weekRejected: {type: integer}
+                  purchasedTotal: {type: integer}
+                  recentLogs: {type: array, maxItems: 8, items: {type: object, properties: {id: {type: string}, at: {type: integer}, bookId: {type: string}, bookTitle: {type: string}, status: {type: string, enum: [approved, rejected, purchased]}}}}
+components:
+  securitySchemes:
+    sessionCookie: {type: apiKey, in: cookie, name: bookbinder_session}
+  responses:
+    AuthRequired: {description: AUTH_REQUIRED — 로그인이 필요해요., content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    Forbidden: {description: 'FORBIDDEN / CSRF_FAILED', content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    NotFound: {description: NOT_FOUND — 도서를 찾을 수 없어요., content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    ValidationError: {description: VALIDATION_ERROR, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: {type: string}
+            message: {type: string}
+            fields: {type: object, additionalProperties: {type: string}}
+          required: [code, message]
+    Status: {type: string, enum: [pending, approved, rejected, purchased]}
+    User:
+      type: object
+      properties:
+        id: {type: string}
+        loginId: {type: string}
+        name: {type: string}
+        role: {type: string, enum: [student, librarian]}
+        classNo: {type: string, description: 학생만}
+        studentNo: {type: string, description: 학생만}
+        joinedAt: {type: integer, description: UTC epoch ms}
+      required: [id, loginId, name, role, joinedAt]
+    Book:
+      type: object
+      properties:
+        id: {type: string, description: 정규화된 ISBN-13}
+        isbn: {type: string}
+        title: {type: string}
+        author: {type: string}
+        publisher: {type: string}
+        year: {type: integer, nullable: true}
+        pubDate: {type: string, format: date, nullable: true}
+        price: {type: integer, nullable: true, description: null은 가격 미정이며 0원과 다르다}
+        description: {type: string}
+        owned: {type: boolean, description: 소장 목록에 있거나 도서 상태가 purchased}
+        cover: {type: string}
+      required: [id, isbn, title, author, publisher, price, description, owned]
+    SearchItem:
+      allOf:
+        - $ref: '#/components/schemas/Book'
+        - type: object
+          properties:
+            requestCount: {type: integer}
+            requestState: {type: string, enum: [owned, requested, rejected, available]}
+    BookRequest:
+      type: object
+      properties:
+        id: {type: string}
+        bookId: {type: string}
+        userId: {type: string}
+        createdAt: {type: integer}
+    Review:
+      type: object
+      properties:
+        bookId: {type: string}
+        status: {$ref: '#/components/schemas/Status'}
+        reason: {type: string, description: rejected일 때만}
+        quantity: {type: integer, minimum: 0}
+        updatedAt: {type: integer}
+    Notification:
+      type: object
+      properties:
+        id: {type: string}
+        userId: {type: string}
+        bookId: {type: string}
+        bookTitle: {type: string}
+        status: {type: string, enum: [approved, rejected, purchased]}
+        reason: {type: string}
+        message: {type: string}
+        createdAt: {type: integer}
+        read: {type: boolean}
+    Requester:
+      type: object
+      properties: {id: {type: string}, name: {type: string}, classNo: {type: string}, studentNo: {type: string}}
+    BookRow:
+      type: object
+      properties:
+        book: {$ref: '#/components/schemas/Book'}
+        review: {$ref: '#/components/schemas/Review'}
+        requests: {type: array, items: {$ref: '#/components/schemas/BookRequest'}, description: 최근 신청순}
+        requesters: {type: array, items: {$ref: '#/components/schemas/Requester'}, description: requests와 같은 순서}
+        latestAt: {type: integer}
+        firstAt: {type: integer}
+    ChangeResult:
+      type: object
+      properties:
+        changed: {type: integer}
+        items: {type: array, items: {$ref: '#/components/schemas/Review'}}
+    BudgetRow:
+      type: object
+      properties:
+        book: {$ref: '#/components/schemas/Book'}
+        review: {$ref: '#/components/schemas/Review'}
+        subtotal: {type: integer, nullable: true, description: 'price × quantity, 가격이 null이면 null'}
+        latestAt: {type: integer}
+        firstAt: {type: integer}
+    Budget:
+      type: object
+      properties:
+        period: {type: string}
+        include: {type: array, items: {type: string}}
+        expected: {type: array, items: {$ref: '#/components/schemas/BudgetRow'}}
+        purchased: {type: array, items: {$ref: '#/components/schemas/BudgetRow'}}
+        expectedTotal: {type: integer}
+        purchasedTotal: {type: integer}
+        statusTotals: {type: object, description: 기간 안 책의 상태별 소계 합(include와 무관), properties: {pending: {type: integer}, approved: {type: integer}, rejected: {type: integer}, purchased: {type: integer}}}
+        missingPriceCount: {type: integer}
+        monthly: {type: array, items: {type: object, properties: {label: {type: string}, amount: {type: integer}, books: {type: integer}}}}

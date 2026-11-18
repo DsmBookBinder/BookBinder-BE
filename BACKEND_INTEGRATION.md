@@ -1,23 +1,45 @@
-# 도서·신청·알림 연결 안내
+# 도서·신청·알림·관리자 연결 안내 (FE 동작 기준 계약)
 
-현재 B 영역의 검색, 상세, 신청, 내 신청 목록, 알림 목록과 읽음 API의 초기 구현이다. 실제 서비스 배포 준비가 된 상태는 아니다.
+BookBinder-FE(`main` d87ce56 + `fix/2-student-registration`의 학생 전용 가입·학번 5자리)의 동작을 기준으로 맞춘 계약이다. FE와 BE가 충돌하면 BE를 FE에 맞춘다. 상세 계약은 `openapi.yaml`.
+실제 서비스 배포 준비가 된 상태는 아니다.
 
-## 인증 연결
+## 계약 요약
 
-회원가입·로그인·로그아웃·CSRF·내 정보 API가 구현되어 있다. 인증 미들웨어는 서버 측 세션에서 `g.current_user` 및 `g.csrf_valid`를 설정한다. 회원가입은 학생만 가능하다. 쿠키는 HttpOnly, SameSite=Lax이며 운영 HTTPS에서는 `SESSION_COOKIE_SECURE=true`로 설정해야 한다. 로그인과 로그아웃 후 `/api/auth/csrf`에서 새 토큰을 발급받는다. 운영 공개 전 로그인 요청 제한, 세션 만료 레코드 정리, 실제 MySQL 및 HTTPS/CORS 설정 검증이 필요하다.
+- JSON 키 camelCase, 상태(`pending|approved|rejected|purchased`)·역할(`student|librarian`) 소문자, 시간은 UTC epoch ms 정수, 모든 id는 문자열.
+- 도서 id = 정규화된 ISBN-13. **처리 상태는 도서 단위**(`requested_books.status`)이며 한 책을 신청한 모든 학생에게 같이 적용되고 모두에게 알림이 간다.
+- 반려된 책은 누구도 다시 신청할 수 없고, 구매완료된 책은 교내 소장으로 취급한다(되돌리면 해제).
+- 오류: `{"error": {"code", "message", "fields"?}}`, 메시지는 FE 문구 그대로.
+- 날짜 경계(기간 필터, 학기, 이번 주, 월별)는 Asia/Seoul 기준.
+
+## 인증
+
+서버 세션 쿠키(HttpOnly, SameSite=Lax) + CSRF 헤더(`X-CSRF-Token`) + 비밀번호 해시 + 역할 검사는 그대로다.
+`GET /api/auth/csrf`와 `POST /api/auth/login`이 `csrfToken`을 돌려준다. 학생 전용 공개 가입(학번 숫자 5자리, 학년/반 `^[1-3]-\d{1,2}$`, 아이디 영문·숫자 4~20자, 비밀번호 8자 이상).
+사서 계정은 운영자가 `flask --app app:create_app auth create-librarian <아이디> --name <이름>`으로 발급한다.
+`PATCH /api/me/password`로 비밀번호를 바꾸면 현재 세션 외 같은 사용자의 다른 세션은 삭제된다.
+
+## CORS
+
+`CORS_ORIGINS`(쉼표 구분, 정확히 일치하는 출처만, `*` 불가)에 FE 출처를 넣는다(예: `http://localhost:5173`). 비우면 CORS 헤더를 붙이지 않는다.
+쿠키는 SameSite=Lax라 FE와 BE가 같은 사이트일 때만 동작한다. 배포 주소가 다른 사이트면 `SameSite=None; Secure`와 출처 설정을 다시 결정해야 한다.
 
 ## 도서 데이터 연결
 
-`app.config['BOOK_PROVIDER']`에 `search(query, page, page_size)`와 `get(isbn)`을 제공하는 객체를 넣는다. `get`은 미발견 시 None, 발견 시 `title`, `author`, `publisher`, `price`, `cover_url`을 포함하는 dict를 반환한다. 가격은 원 단위 정수 또는 None이다. 외부 오류는 `ProviderError`, 타임아웃은 `ProviderTimeout`, 미설정은 `ProviderUnavailable`이다. 실제 제공처와 응답 정규화는 미구현이다.
+`BOOK_PROVIDER`, `LIBRARY_CATALOG` 환경변수는 `none`(기본, 503) 또는 `fixture`이다. **fixture는 개발 전용**(FE 샘플 24권, `app/books/fixture_data/books.json`)이며 `FLASK_DEBUG=1`일 때만 켜지고 운영에서는 거부된다. 실제 외부 공급자와 DLS 소장 파일 반입은 접근 정보가 없어 구현하지 않았다.
 
-`app.config['LIBRARY_CATALOG']`에 `search(query, page, page_size)`와 `ownership(isbn)`을 제공하는 객체를 넣는다. ownership은 `OWNED`, `NOT_OWNED`, `UNKNOWN` 중 하나를 반환한다. 미설정 또는 UNKNOWN은 신청을 허용하지 않는다. 검증된 행을 받아 검색과 소장 여부를 판정하는 `app.books.catalog.CatalogSnapshot`을 제공한다. ISBN 없는 소장 행이 하나라도 있으면 일치하지 않는 ISBN의 소장 여부를 UNKNOWN으로 처리하여 신청을 차단한다. 실제 DLS 파일 반입은 미구현이다.
+- `app.config['BOOK_PROVIDER']`: `search(query, page, page_size)` → `{items: [...]}`, `get(isbn)`. 항목은 `isbn, title, author, publisher, price, cover_url, pub_date(YYYY-MM-DD), description`.
+- `app.config['LIBRARY_CATALOG']`: `ownership(isbn)`(`OWNED|NOT_OWNED|UNKNOWN`)와 `books()`(소장 목록 전체). `CatalogSnapshot`이 둘 다 제공한다.
+- 소장 확인 불가(UNKNOWN/미설정)는 신청을 막는다(fail closed).
+- 전체 도서의 범위: 공급자 검색 결과(검색어가 있을 때) + 교내 소장 목록 + 이미 신청된 책.
 
-검색 provider는 Notion API 명세의 items/page/page_size/has_next 형식, 교내 catalog는 items/page/page_size/total/catalog_updated_at 형식으로 반환한다. 데이터 접근 제어는 공급자에 위임하지 않는다.
+## DB
 
-## DB와 관리자 연동
+`migrations/003_fe_book_level_state.sql`(000~002 다음, 백업·검토 후, `mysql` 클라이언트로 `--force` 없이 실행). 운영 DB에는 승인 없이 적용하지 않는다.
+- 책 단위 상태를 기준으로 되돌림. 신청별 상태가 섞인 책은 purchased > approved > pending > rejected 우선순위로 합친다(FE에 없는 이전용 결정). 섞인 책 수가 실행 중 출력된다.
+- `requested_books.isbn`이 NULL인 행이 있으면 중단된다(값을 만들지 않는다).
+- `pub_date`, `description`, `reject_reason VARCHAR(500)` 추가. `notifications`에 `requested_book_id`, `reason` 추가, `request_id`는 NULL 허용 + `ON DELETE SET NULL`. `review_logs` 신규.
+- `book_requests`의 `status/reject_reason/processed_by/processed_at/price`는 남기되 더 이상 읽거나 쓰지 않는다(legacy).
 
-`migrations/000_auth.sql`과 `001_book_requests.sql`은 새 MySQL 8 데이터베이스용 초안이다. 운영 DB 적용 전 백업·검토 및 실제 MySQL 검증이 필요하다. 관리자 API는 사용자가 제공한 신청 단위 명세에 맞춰 구현되었다. `002_admin_request_state.sql`을 추가 적용하며, `book_requests`의 조건부 상태 갱신과 해당 신청자 알림 생성을 같은 트랜잭션으로 처리한다. 신청 당시 가격 및 신청별 상태 전환, 기존 데이터 제한은 `docs/admin-implementation.md`를 참고한다.
+## 테스트
 
-Notion API 명세의 snake_case 및 items 구조를 임시로 사용한다. 기존 개발 규칙 초안의 camelCase/공통 응답 포장과 충돌하므로 FE 연동 전 A와 최종 계약을 확정해야 한다. 모의 공급자 테스트는 실제 공급자나 MySQL 검증을 대체하지 않는다.
-
-테스트: `python -m unittest discover -s tests -v` (먼저 requirements.txt 설치). 테스트는 SQLite와 모의 인증·제공처를 사용한다.
+`python -m unittest discover -s tests -v` (먼저 requirements.txt 설치). 테스트는 SQLite(외래 키 활성)와 fixture 공급자를 사용하며 실제 MySQL의 DDL·잠금·`ON DELETE SET NULL`을 대신하지 못한다.
