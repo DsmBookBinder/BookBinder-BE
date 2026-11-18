@@ -8,6 +8,8 @@ class Config:
 
     def __init__(self):
         self.SECRET_KEY = os.getenv("SECRET_KEY")
+        # Exact FE origins allowed by CORS (comma separated, e.g. http://localhost:5173). Empty = no CORS headers.
+        self.CORS_ORIGINS_RAW = os.getenv("CORS_ORIGINS", "")
         self.SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "false").lower() == "true"
         self.SQLALCHEMY_DATABASE_URI = URL.create(
             "mysql+pymysql",

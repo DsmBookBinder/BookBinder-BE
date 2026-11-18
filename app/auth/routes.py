@@ -1,14 +1,16 @@
+import click
 import hashlib
 import hmac
 import re
 import secrets
 from datetime import timedelta
 from flask import Blueprint, current_app, g, request, make_response
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from werkzeug.security import check_password_hash, generate_password_hash
 from app.auth.models import User, AuthSession, now
-from app.books.routes import error
+from app.errors import CSRF_FAILED, AUTH_REQUIRED, error, fail
+from app.serializers import user_out
 from app.db import db
 
 api = Blueprint('auth', __name__, url_prefix='/api')
@@ -51,16 +53,41 @@ def attach_cookie(response, token):
 
 
 def csrf_required():
-    return None if g.csrf_valid else error('CSRF_FAILED', '요청을 확인할 수 없습니다.', 403)
-
-
-def private(user):
-    return {'id': str(user.id), 'login_id': user.login_id, 'name': user.name, 'role': user.role.upper(),
-            'grade_class': user.grade_class, 'student_no': user.student_no, 'created_at': user.created_at.isoformat(timespec='seconds') + 'Z'}
+    return None if g.csrf_valid else fail(CSRF_FAILED)
 
 
 def valid_text(value, maximum):
     return isinstance(value, str) and 1 <= len(value.strip()) <= maximum
+
+
+LOGIN_ID = re.compile(r'[a-zA-Z0-9]{4,20}')
+CLASS_NO = re.compile(r'[1-3]-[0-9]{1,2}')
+STUDENT_NO = re.compile(r'[0-9]{5}')
+FIELD_MESSAGES = {
+    'name': '이름을 입력해 주세요.',
+    'loginId': '영문·숫자 4~20자로 입력해 주세요.',
+    'password': '8자 이상 입력해 주세요.',
+    'password2': '비밀번호가 서로 달라요.',
+    'classNo': '2-3처럼 학년-반으로 입력해 주세요.',
+    'studentNo': '숫자 5자리 학번을 입력해 주세요.',
+}
+
+
+def text(data, key):
+    value = data.get(key)
+    return value if isinstance(value, str) else ''
+
+
+def check_profile(data):
+    """FE rules shared by signup and profile edit. Returns {field: message} for bad fields."""
+    bad = {}
+    if not valid_text(data.get('name'), 50):
+        bad['name'] = FIELD_MESSAGES['name']
+    if not CLASS_NO.fullmatch(text(data, 'classNo').strip()):
+        bad['classNo'] = FIELD_MESSAGES['classNo']
+    if not STUDENT_NO.fullmatch(text(data, 'studentNo')):
+        bad['studentNo'] = FIELD_MESSAGES['studentNo']
+    return bad
 
 
 @api.get('/auth/csrf')
@@ -70,12 +97,12 @@ def csrf_token():
         csrf = secrets.token_urlsafe(32)
         g.auth_session.csrf_hash = digest(csrf)
         db.session.commit()
-        response = make_response({'csrf_token': csrf})
+        response = make_response({'csrfToken': csrf})
         response.headers['Cache-Control'] = 'no-store'
         return response
     token, csrf = new_session()
     db.session.commit()
-    return attach_cookie(make_response({'csrf_token': csrf}), token)
+    return attach_cookie(make_response({'csrfToken': csrf}), token)
 
 
 @api.post('/auth/signup')
@@ -83,20 +110,31 @@ def signup():
     denied = csrf_required()
     if denied: return denied
     data = request.get_json(silent=True)
-    if not isinstance(data, dict) or set(data) != {'login_id', 'password', 'name', 'grade_class', 'student_no'}:
+    allowed = {'loginId', 'password', 'password2', 'name', 'classNo', 'studentNo'}
+    if not isinstance(data, dict) or not set(data) <= allowed:
         return error('VALIDATION_ERROR', '가입 정보를 확인해 주세요.', 400)
-    login = data['login_id']
-    password = data['password']
-    if not isinstance(login, str) or not re.fullmatch(r'[A-Za-z0-9_]{4,50}', login) or not isinstance(password, str) or not 10 <= len(password) <= 128 or not valid_text(data['name'], 50) or not valid_text(data['grade_class'], 20) or not valid_text(data['student_no'], 20):
-        return error('VALIDATION_ERROR', '가입 정보를 확인해 주세요.', 400)
-    account = User(login_id=login.lower(), password_hash=generate_password_hash(password), name=data['name'].strip(), role='student', grade_class=data['grade_class'].strip(), student_no=data['student_no'].strip())
+    fields = check_profile(data)
+    login_id, password = text(data, 'loginId').strip(), text(data, 'password')
+    if not LOGIN_ID.fullmatch(login_id):
+        fields['loginId'] = FIELD_MESSAGES['loginId']
+    if not 8 <= len(password) <= 128:
+        fields['password'] = FIELD_MESSAGES['password']
+    if 'password2' in data and data['password2'] != password:
+        fields['password2'] = FIELD_MESSAGES['password2']
+    if fields:
+        return error('VALIDATION_ERROR', '가입 정보를 확인해 주세요.', 400, fields)
+    account = User(login_id=login_id.lower(), password_hash=generate_password_hash(password), name=data['name'].strip(), role='student',
+                   grade_class=data['classNo'].strip(), student_no=data['studentNo'])
+    duplicate = error('DUPLICATE_LOGIN_ID', '이미 사용 중인 아이디예요.', 409, {'loginId': '이미 사용 중인 아이디예요.'})
+    if db.session.scalar(select(User.id).where(User.login_id == account.login_id)) is not None:
+        return duplicate
     try:
         db.session.add(account)
         db.session.commit()
     except IntegrityError:
         db.session.rollback()
-        return error('DUPLICATE_LOGIN_ID', '이미 사용 중인 아이디입니다.', 409)
-    return {'id': str(account.id), 'login_id': account.login_id, 'name': account.name, 'role': 'STUDENT'}, 201
+        return duplicate
+    return user_out(account), 201
 
 
 @api.post('/auth/login')
@@ -104,26 +142,27 @@ def login():
     denied = csrf_required()
     if denied: return denied
     data = request.get_json(silent=True)
-    if not isinstance(data, dict) or set(data) != {'login_id', 'password'} or not isinstance(data['login_id'], str) or not isinstance(data['password'], str) or not 1 <= len(data['login_id']) <= 50 or not 1 <= len(data['password']) <= 128:
+    if not isinstance(data, dict) or set(data) != {'loginId', 'password'} or not isinstance(data['loginId'], str) or not isinstance(data['password'], str) or not 1 <= len(data['loginId'].strip()) <= 50 or not 1 <= len(data['password']) <= 128:
         return error('VALIDATION_ERROR', '로그인 정보를 확인해 주세요.', 400)
-    account = db.session.execute(select(User).where(User.login_id == data['login_id'].lower())).scalar_one_or_none()
+    account = db.session.execute(select(User).where(User.login_id == data['loginId'].strip().lower())).scalar_one_or_none()
     valid = check_password_hash(account.password_hash if account else DUMMY_HASH, data['password'])
     if not valid or account is None:
-        return error('INVALID_CREDENTIALS', '아이디 또는 비밀번호가 맞지 않습니다.', 401)
+        return error('INVALID_CREDENTIALS', '아이디 또는 비밀번호가 맞지 않아요.', 401)
     if g.auth_session: db.session.delete(g.auth_session)
-    token, unused_csrf = new_session(account.id)
+    token, csrf = new_session(account.id)
     db.session.commit()
-    response = make_response({'user': {'id': str(account.id), 'name': account.name, 'role': account.role.upper()}})
+    response = make_response({'user': user_out(account), 'csrfToken': csrf})
     return attach_cookie(response, token)
 
 
 @api.post('/auth/logout')
 def logout():
-    if not g.current_user: return error('AUTH_REQUIRED', '로그인이 필요합니다.', 401)
-    denied = csrf_required()
-    if denied: return denied
-    db.session.delete(g.auth_session)
-    db.session.commit()
+    # FE logout() cannot fail: without a session there is nothing to end, so answer 204 as well.
+    if g.current_user:
+        denied = csrf_required()
+        if denied: return denied
+        db.session.delete(g.auth_session)
+        db.session.commit()
     response = make_response('', 204)
     response.delete_cookie(COOKIE, path='/', secure=current_app.config.get('SESSION_COOKIE_SECURE', False), httponly=True, samesite='Lax')
     response.headers['Cache-Control'] = 'no-store'
@@ -132,13 +171,71 @@ def logout():
 
 @api.route('/me', methods=['GET', 'PATCH'])
 def me():
-    if not g.current_user: return error('AUTH_REQUIRED', '로그인이 필요합니다.', 401)
+    if not g.current_user: return fail(AUTH_REQUIRED)
     if request.method == 'PATCH':
         denied = csrf_required()
         if denied: return denied
         data = request.get_json(silent=True)
-        if not isinstance(data, dict) or not data or not set(data) <= {'name', 'grade_class'} or ('name' in data and not valid_text(data['name'], 50)) or ('grade_class' in data and (g.current_user.role != 'student' or not valid_text(data['grade_class'], 20))):
-            return error('VALIDATION_ERROR', '수정 정보를 확인해 주세요.', 400)
-        for key, value in data.items(): setattr(g.current_user, key, value.strip())
+        message = '이름, 학년/반(예: 2-3), 학번(숫자 5자리)을 확인해 주세요.'
+        if not isinstance(data, dict):
+            return error('VALIDATION_ERROR', message, 400)
+        if g.current_user.role == 'student':
+            # The FE profile modal always sends all three values together.
+            if set(data) != {'name', 'classNo', 'studentNo'}:
+                return error('VALIDATION_ERROR', message, 400)
+            fields = check_profile(data)
+            if fields:
+                return error('VALIDATION_ERROR', message, 400, fields)
+            g.current_user.name = data['name'].strip()
+            g.current_user.grade_class = data['classNo'].strip()
+            g.current_user.student_no = data['studentNo']
+        else:
+            if set(data) != {'name'} or not valid_text(data['name'], 50):
+                return error('VALIDATION_ERROR', FIELD_MESSAGES['name'], 400, {'name': FIELD_MESSAGES['name']})
+            g.current_user.name = data['name'].strip()
         db.session.commit()
-    return private(g.current_user)
+    return user_out(g.current_user)
+
+
+@api.patch('/me/password')
+def change_password():
+    if not g.current_user: return fail(AUTH_REQUIRED)
+    denied = csrf_required()
+    if denied: return denied
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not {'currentPassword', 'newPassword'} <= set(data) or not set(data) <= {'currentPassword', 'newPassword', 'newPasswordConfirm'} \
+            or not isinstance(data['currentPassword'], str) or not isinstance(data['newPassword'], str):
+        return error('VALIDATION_ERROR', '비밀번호 정보를 확인해 주세요.', 400)
+    if not 8 <= len(data['newPassword']) <= 128:
+        return error('VALIDATION_ERROR', '새 비밀번호는 8자 이상이어야 해요.', 400, {'newPassword': '새 비밀번호는 8자 이상이어야 해요.'})
+    if 'newPasswordConfirm' in data and data['newPasswordConfirm'] != data['newPassword']:
+        return error('VALIDATION_ERROR', '새 비밀번호가 서로 달라요.', 400, {'newPasswordConfirm': '새 비밀번호가 서로 달라요.'})
+    if not check_password_hash(g.current_user.password_hash, data['currentPassword']):
+        return error('INVALID_PASSWORD', '현재 비밀번호가 맞지 않아요.', 400)
+    g.current_user.password_hash = generate_password_hash(data['newPassword'])
+    # Sign out every other session of this user; the current one stays.
+    db.session.execute(delete(AuthSession).where(AuthSession.user_id == g.current_user.id, AuthSession.token_hash != g.auth_session.token_hash))
+    db.session.commit()
+    response = make_response('', 204)
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+@api.cli.command('create-librarian')
+@click.argument('login_id')
+@click.option('--name', required=True)
+def create_librarian(login_id, name):
+    """Operator-only librarian issuing (the FE has no public librarian signup)."""
+    if not LOGIN_ID.fullmatch(login_id) or not valid_text(name, 50):
+        raise click.ClickException('아이디 또는 이름을 확인해 주세요.')
+    password = click.prompt('비밀번호', hide_input=True, confirmation_prompt=True)
+    if not 8 <= len(password) <= 128:
+        raise click.ClickException('비밀번호는 8~128자로 입력해 주세요.')
+    account = User(login_id=login_id.lower(), name=name.strip(), role='librarian', password_hash=generate_password_hash(password))
+    db.session.add(account)
+    try:
+        db.session.commit()
+    except IntegrityError as exc:
+        db.session.rollback()
+        raise click.ClickException('계정을 발급할 수 없습니다. 아이디 중복을 확인해 주세요.') from exc
+    click.echo('사서 계정을 발급했습니다.')
