@@ -178,6 +178,32 @@ class RequestTests(AppCase):
         self.assertEqual((response.status_code, len(calls)), (201, 2))
         self.assertEqual(db.session.query(BookRequest).filter_by(user_id=self.users['s2']).count(), 1)
 
+    def test_partial_work_of_a_failed_attempt_is_rolled_back_before_the_retry(self):
+        from unittest.mock import patch
+        from sqlalchemy.exc import IntegrityError
+        from app.requests import routes
+        real = routes.create_once
+        for make_error in (lambda: IntegrityError('x', {}, Exception()), self.deadlock):
+            db.session.query(BookRequest).delete()
+            db.session.query(RequestedBook).delete()
+            db.session.commit()
+            calls = []
+            def fails_after_flush(isbn, uid):
+                calls.append(1)
+                if len(calls) == 1:
+                    # Change the DB and flush, then fail: only a rollback can remove this row before the retry.
+                    db.session.add(RequestedBook(isbn=isbn, title='partial attempt', author='a', publisher='p', price=1))
+                    db.session.flush()
+                    raise make_error()
+                return real(isbn, uid)
+            with patch.object(routes, 'create_once', side_effect=fails_after_flush):
+                response = self.request_book('s1')
+            self.assertEqual((response.status_code, len(calls)), (201, 2))
+            db.session.expire_all()
+            book = db.session.query(RequestedBook).one()
+            self.assertEqual(book.title, '소년이 온다')  # the half-written first attempt is gone
+            self.assertEqual(db.session.query(BookRequest).count(), 1)
+
     def test_same_student_duplicate_after_integrity_error_is_409(self):
         from unittest.mock import patch
         from sqlalchemy.exc import IntegrityError
@@ -237,6 +263,7 @@ class RequestTests(AppCase):
         from sqlalchemy import event
         first = self.request_book('s1').get_json()['request']['id']
         self.request_book('s2')
+        self.call('lib', 'patch', f'/api/admin/books/{SOSEON}/quantity', json={'quantity': 5})  # set BEFORE the first cancel
         seen = []
         def record(_conn, clause, _multi, _params, _options):
             if getattr(clause, '_for_update_arg', None) is not None:
@@ -247,9 +274,9 @@ class RequestTests(AppCase):
         finally:
             event.remove(db.engine, 'before_execute', record)
         self.assertEqual(seen.count('book_requests'), 2)  # re-check of the request itself + the "remaining" read
-        self.assertEqual(db.session.query(RequestedBook).one().status, 'pending')
-        # Another requester remains, so the book keeps its state and quantity.
-        self.call('lib', 'patch', f'/api/admin/books/{SOSEON}/quantity', json={'quantity': 5})
+        # Another requester remains, so the quantity must survive the first cancel (an unconditional reset to 1 would fail here).
+        db.session.expire_all()
+        self.assertEqual(db.session.query(RequestedBook).one().quantity, 5)
         last = db.session.query(BookRequest).one().id
         self.assertEqual(self.call('s2', 'delete', f'/api/me/requests/{last}').status_code, 204)
         self.assertEqual(db.session.query(RequestedBook).one().quantity, 1)  # last requester left: reset

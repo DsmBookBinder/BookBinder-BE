@@ -118,9 +118,24 @@ class AuthTests(AppCase):
         self.assertEqual(self.client.patch('/api/me/password', json={}).status_code, 401)
 
     def test_concurrent_password_change_second_request_is_rejected(self):
-        # Two requests of the same session race: the first changes the password and removes the other sessions.
-        # The second runs after the first and must stop before touching the hash or the sessions.
+        # Both requests have ALREADY resolved their session (resolve_session passed) when the first change commits and
+        # deletes the other sessions. The second must then be stopped by the re-check under the account lock.
+        from types import SimpleNamespace
+        from flask import g, request
+        from sqlalchemy import delete
         from werkzeug.security import check_password_hash, generate_password_hash
+        from app.auth.routes import digest
+        racing = []  # token hashes of the sessions whose request "loses the race"
+
+        def other_request_commits_after_resolve():
+            # Runs right after resolve_session: the session is deleted by "the other request" now, while this
+            # request keeps the stale, already-resolved view of it.
+            if request.path == '/api/me/password' and g.auth_session is not None and g.auth_session.token_hash in racing:
+                token_hash = g.auth_session.token_hash
+                db.session.execute(delete(AuthSession).where(AuthSession.token_hash == token_hash))
+                db.session.commit()
+                g.auth_session = SimpleNamespace(token_hash=token_hash)
+        self.app.before_request(other_request_commits_after_resolve)
         user = db.session.get(User, self.users['s1'])
         user.password_hash = generate_password_hash('oldpassword')
         db.session.commit()
@@ -130,9 +145,12 @@ class AuthTests(AppCase):
         loser_headers = {'X-CSRF-Token': loser.post('/api/auth/login', json={'loginId': 'student1', 'password': 'oldpassword'}, headers=loser_csrf).get_json()['csrfToken']}
         first = winner.patch('/api/me/password', json={'currentPassword': 'oldpassword', 'newPassword': 'newpassword1'}, headers=winner_headers)
         self.assertEqual(first.status_code, 204)
-        # The loser's session was deleted by the first change, so its request ends before the hash update.
+        # The first change removed the loser's session; give it a fresh one that resolves normally and then loses the race.
+        relogin = loser.post('/api/auth/login', json={'loginId': 'student1', 'password': 'newpassword1'}, headers=self.csrf_for(loser))
+        loser_headers = {'X-CSRF-Token': relogin.get_json()['csrfToken']}
+        racing.append(digest(loser.get_cookie(COOKIE).value))
         second = loser.patch('/api/me/password', json={'currentPassword': 'newpassword1', 'newPassword': 'otherpassword2'}, headers=loser_headers)
-        self.assertEqual(second.status_code, 401)
+        self.assertEqual(second.status_code, 401)  # resolved fine, then rejected by the re-check under the lock
         db.session.expire_all()
         self.assertTrue(check_password_hash(db.session.get(User, self.users['s1']).password_hash, 'newpassword1'))
         self.assertEqual(winner.get('/api/me').status_code, 200)  # the session of the request that finished first remains

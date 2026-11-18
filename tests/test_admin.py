@@ -280,8 +280,10 @@ class AdminConcurrencyTests(AdminTestBase):
         self.assertGreaterEqual(seen.count('book_requests'), 2)  # "has requests" check and the notification fan-out
         self.assertEqual(db.session.query(Notification).count(), 2)
 
-    def test_late_requester_is_notified(self):
-        # A student who requested between the first read and the approval must get the notification too.
+    def test_requester_added_before_approval_is_notified(self):
+        # Ordering sanity check only: the request is committed BEFORE the approval call, so this passes even with a
+        # plain SELECT. SQLite cannot reproduce MySQL's REPEATABLE READ snapshot; the guard against a stale snapshot is
+        # the locking-read check above, and the real two-connection case needs a MySQL test database (not run here).
         self.add_request('s3', SOSEON, datetime(2026, 11, 19, 1))
         self.status([SOSEON], 'approved')
         recipients = {n.user_id for n in db.session.query(Notification)}
