@@ -25,7 +25,12 @@ class CatalogSnapshot:
             self.has_unidentified |= isbn is None
             if isbn:
                 self.isbns.add(isbn)
-            self.rows.append({'isbn': isbn, 'title': row['title'].strip(), 'author': row['author'].strip(), 'publisher': row['publisher'].strip(), 'ownership': 'OWNED'})
+            item = {'isbn': isbn, 'title': row['title'].strip(), 'author': row['author'].strip(), 'publisher': row['publisher'].strip(), 'ownership': 'OWNED'}
+            # Optional metadata some sources can supply (never required).
+            for key in ('price', 'cover_url', 'pub_date', 'description'):
+                if row.get(key) is not None:
+                    item[key] = row[key]
+            self.rows.append(item)
 
     def ownership(self, isbn):
         isbn = normalize_isbn(isbn)
@@ -34,6 +39,10 @@ class CatalogSnapshot:
         # An unidentified entry might be the requested edition. Avoid asserting
         # a negative when the source cannot support it.
         return 'UNKNOWN' if self.has_unidentified else 'NOT_OWNED'
+
+    def books(self):
+        """Every identified owned row (rows without an ISBN cannot be a book id)."""
+        return [dict(r) for r in self.rows if r['isbn']]
 
     def search(self, query, page, page_size):
         needle = query.casefold()

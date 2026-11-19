@@ -1,84 +1,86 @@
-"""Read-only book search endpoints; integrations are deliberately injected."""
-from flask import Blueprint, current_app, g, request
+"""Book search, detail and popular books (FE Search.tsx / BookDetail.tsx)."""
+from flask import Blueprint, g, request
 
 from app.books.isbn import normalize_isbn
 from app.books.providers import ProviderError, ProviderTimeout, ProviderUnavailable
+from app.errors import AUTH_REQUIRED, BOOK_NOT_FOUND, FILTER_INVALID, PROVIDER_MESSAGE, error, fail
 
 books_api = Blueprint("books", __name__, url_prefix="/api")
 
 
-def error(code, message, status):
-    return {"error": {"code": code, "message": message}}, status
+def current_id():
+    # Authentication middleware sets g.current_user from a server-side session; headers are never trusted.
+    identity = getattr(g, "current_user", None)
+    if identity is None:
+        return None
+    return identity.get("id") if isinstance(identity, dict) else getattr(identity, "id", None)
 
 
 def authenticated():
-    # A's authentication middleware must set g.current_user after verifying a session.
-    # Missing integration fails closed; request headers are never trusted as identity.
-    identity = getattr(g, "current_user", None)
-    return identity is not None and (identity.get("id") if isinstance(identity, dict) else getattr(identity, "id", None)) is not None
+    return current_id() is not None
 
 
-def pagination():
-    query = request.args.get("query", "").strip()
-    if not 1 <= len(query) <= 100:
-        raise ValueError("query")
-    values = []
-    for key, default in (("page", "1"), ("page_size", "20")):
-        raw = request.args.get(key, default)
-        if not raw.isascii() or not raw.isdigit():
-            raise ValueError(key)
-        values.append(int(raw))
-    page, size = values
-    if page < 1 or not 1 <= size <= 100:
-        raise ValueError("pagination")
-    return query, page, size
+def provider_error(exc):
+    if isinstance(exc, ProviderTimeout):
+        return error("BOOK_PROVIDER_TIMEOUT", PROVIDER_MESSAGE, 504)
+    if isinstance(exc, ProviderError):
+        return error("BOOK_PROVIDER_ERROR", PROVIDER_MESSAGE, 502)
+    return error("BOOK_PROVIDER_UNAVAILABLE", PROVIDER_MESSAGE, 503)
 
 
-def provider_call(config_key, operation, unavailable_code):
-    provider = current_app.config.get(config_key)
-    if provider is None:
-        return error(unavailable_code, "데이터 제공처를 사용할 수 없습니다.", 503)
-    try:
-        result = operation(provider)
-    except ProviderUnavailable:
-        return error(unavailable_code, "데이터 제공처를 사용할 수 없습니다.", 503)
-    except ProviderTimeout:
-        return error("BOOK_PROVIDER_TIMEOUT", "도서 제공처 응답 시간이 초과되었습니다.", 504)
-    except ProviderError:
-        return error("BOOK_PROVIDER_ERROR", "도서 제공처에 문제가 발생했습니다.", 502)
-    if result is None:
-        return error("NOT_FOUND", "도서를 찾을 수 없습니다.", 404)
-    return result, 200
+def integer_arg(name, default, minimum, maximum):
+    raw = request.args.get(name, str(default))
+    if not raw.isascii() or not raw.isdigit():
+        raise ValueError(name)
+    value = int(raw)
+    if not minimum <= value <= maximum:
+        raise ValueError(name)
+    return value
 
 
 @books_api.get("/books")
 def search_books():
+    from app.books import service
     if not authenticated():
-        return error("AUTH_REQUIRED", "로그인이 필요합니다.", 401)
+        return fail(AUTH_REQUIRED)
+    query = request.args.get("q", "").strip()
+    scope, sort = request.args.get("scope", "all"), request.args.get("sort", "relevance")
     try:
-        query, page, size = pagination()
+        page = integer_arg("page", 1, 1, 10**9)
+        size = integer_arg("pageSize", 5, 1, 100)
     except ValueError:
-        return error("VALIDATION_ERROR", "검색 조건을 확인해 주세요.", 400)
-    return provider_call("BOOK_PROVIDER", lambda p: p.search(query, page, size), "BOOK_PROVIDER_UNAVAILABLE")
+        return fail(FILTER_INVALID)
+    if len(query) > 100 or scope not in ("all", "owned") or sort not in ("relevance", "popular"):
+        return fail(FILTER_INVALID)
+    try:
+        return service.search(current_id(), query, scope, sort, page, size)
+    except (ProviderUnavailable, ProviderError, ProviderTimeout) as exc:
+        return provider_error(exc)
 
 
-@books_api.get("/books/<isbn>")
-def book_detail(isbn):
+@books_api.get("/books/popular")
+def popular_books():
+    from app.books import service
     if not authenticated():
-        return error("AUTH_REQUIRED", "로그인이 필요합니다.", 401)
+        return fail(AUTH_REQUIRED)
     try:
-        isbn = normalize_isbn(isbn)
+        limit = integer_arg("limit", 5, 1, 50)
     except ValueError:
-        return error("VALIDATION_ERROR", "ISBN을 확인해 주세요.", 400)
-    return provider_call("BOOK_PROVIDER", lambda p: p.get(isbn), "BOOK_PROVIDER_UNAVAILABLE")
+        return fail(FILTER_INVALID)
+    return service.popular(limit)
 
 
-@books_api.get("/library/books")
-def search_library():
+@books_api.get("/books/<book_id>")
+def book_detail(book_id):
+    from app.books import service
     if not authenticated():
-        return error("AUTH_REQUIRED", "로그인이 필요합니다.", 401)
+        return fail(AUTH_REQUIRED)
     try:
-        query, page, size = pagination()
+        isbn = normalize_isbn(book_id)
     except ValueError:
-        return error("VALIDATION_ERROR", "검색 조건을 확인해 주세요.", 400)
-    return provider_call("LIBRARY_CATALOG", lambda p: p.search(query, page, size), "LIBRARY_CATALOG_UNAVAILABLE")
+        return fail(BOOK_NOT_FOUND)
+    try:
+        data = service.detail(current_id(), isbn)
+    except (ProviderUnavailable, ProviderError, ProviderTimeout) as exc:
+        return provider_error(exc)
+    return fail(BOOK_NOT_FOUND) if data is None else data
