@@ -34,9 +34,9 @@ paths:
                 password: {type: string, minLength: 8, maxLength: 128}
                 password2: {type: string, description: 있으면 password와 같아야 한다}
                 name: {type: string, maxLength: 50}
-                classNo: {type: string, description: 'trim 후 ^[1-3]-[0-9]{1,2}$ 예) 2-3'}
-                studentNo: {type: string, description: '^[0-9]{5}$ (trim 없음)'}
-              required: [loginId, password, name, classNo, studentNo]
+                classNo: {type: string, deprecated: true, description: '생략 가능. 전달할 때는 학번에서 읽은 학년·반과 같아야 한다.'}
+                studentNo: {type: string, description: '숫자 4자리. 1407이면 1학년 4반 7번으로 해석하고 classNo는 1-4로 저장한다. 학년 1~3, 반 1~9, 번호 01~99.'}
+              required: [loginId, password, name, studentNo]
       responses:
         '201': {description: 가입 완료(로그인되지 않음), content: {application/json: {schema: {$ref: '#/components/schemas/User'}}}}
         '400': {$ref: '#/components/responses/ValidationError'}
@@ -53,6 +53,19 @@ paths:
       responses:
         '200': {description: OK, content: {application/json: {schema: {type: object, properties: {user: {$ref: '#/components/schemas/User'}, csrfToken: {type: string}}, required: [user, csrfToken]}}}}
         '401': {description: INVALID_CREDENTIALS, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /api/auth/admin/login:
+    post:
+      summary: 관리자 전용 로그인
+      parameters:
+        - {$ref: '#/components/parameters/CsrfToken'}
+      security: []
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: false, properties: {loginId: {type: string}, password: {type: string}}, required: [loginId, password]}}}
+      responses:
+        '200': {description: 관리자 세션 발급, content: {application/json: {schema: {type: object, properties: {user: {$ref: '#/components/schemas/User'}, csrfToken: {type: string}}, required: [user, csrfToken]}}}}
+        '401': {description: INVALID_CREDENTIALS, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '403': {description: 학생 계정 또는 유효하지 않은 CSRF 토큰, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
   /api/auth/logout:
     post:
       summary: 로그아웃(세션이 이미 없어도 204). 세션이 있으면 X-CSRF-Token이 필요하다
@@ -68,7 +81,8 @@ paths:
         '200': {description: OK, content: {application/json: {schema: {$ref: '#/components/schemas/User'}}}}
         '401': {$ref: '#/components/responses/AuthRequired'}
     patch:
-      summary: 정보 수정(학생은 name·classNo·studentNo 세 값 모두, 사서는 name만)
+      summary: 정보 수정(학생은 name·studentNo, 관리자는 name)
+      description: 학생 학년·반은 학번에서 추출한다. 기존 5자리 학번을 그대로 보내면 그 학번과 학년·반을 보존한다.
       parameters:
         - {$ref: '#/components/parameters/CsrfToken'}
       requestBody:
@@ -90,7 +104,7 @@ paths:
         '400': {description: 'VALIDATION_ERROR 또는 INVALID_PASSWORD(현재 비밀번호가 맞지 않아요.)', content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
   /api/books:
     get:
-      summary: 도서 검색(검색어 없이도 가능)
+      summary: 도서 검색(검색어가 비어 있으면 교내 소장 범위에서만 목록 반환)
       parameters:
         - {in: query, name: q, schema: {type: string, maxLength: 100}, description: 보통 모든 단어가 일치해야 하며 소장 도서 제목은 공백을 무시해서도 검색한다}
         - {in: query, name: scope, schema: {type: string, enum: [all, owned], default: all}}

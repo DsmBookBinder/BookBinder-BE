@@ -14,8 +14,8 @@ BookBinder-FE(`main` d87ce56 + `fix/2-student-registration`의 학생 전용 가
 ## 인증
 
 서버 세션 쿠키(HttpOnly, SameSite=Lax) + CSRF 헤더(`X-CSRF-Token`) + 비밀번호 해시 + 역할 검사는 그대로다.
-`GET /api/auth/csrf`와 `POST /api/auth/login`이 `csrfToken`을 돌려준다. 학생 전용 공개 가입(학번 숫자 5자리, 학년/반 `^[1-3]-\d{1,2}$`, 아이디 영문·숫자 4~20자, 비밀번호 8~128자).
-사서 계정은 운영자가 `flask --app app:create_app auth create-librarian <아이디> --name <이름>`으로 발급한다.
+`GET /api/auth/csrf`와 `POST /api/auth/login`이 `csrfToken`을 돌려준다. 공개 가입은 학생 전용이다. 신청자의 학번은 `1407`처럼 4자리이며 백엔드가 `1-4`를 학년·반으로 저장한다. 기존 5자리 학번은 계정과 신청 이력에 보존된다. 아이디는 영문·숫자 4~20자, 비밀번호는 8~128자다.
+관리자 계정은 운영자가 `flask --app app:create_app auth create-admin <아이디> --name <이름>`으로 발급한다. 내부 역할값 `librarian`은 유지한다. `POST /api/auth/admin/login`은 이 역할만 허용한다.
 로그인과 비밀번호 변경은 같은 계정 행을 `FOR UPDATE`로 잠그고 최신 해시로 검증한다(변경이 먼저 끝나면 이전 비밀번호로 세션이 발급되지 않고, 로그인이 먼저 끝나면 변경 때 그 세션이 삭제된다). `SECRET_KEY`가 비어 있으면 앱이 시작되지 않는다.
 `PATCH /api/me/password`로 비밀번호를 바꾸면 현재 세션 외 같은 사용자의 다른 세션은 삭제된다.
 
@@ -39,6 +39,8 @@ BookBinder-FE(`main` d87ce56 + `fix/2-student-registration`의 학생 전용 가
 3. 로그인한 계정에서 `GET /api/books?scope=owned&q=어린왕자`로 검색하고 응답의 `id`로 상세를 조회한다. 등록번호 원문은 응답에 넣지 않는다. 같은 등록번호·제목·저자·출판사·출판년도의 반복 행만 하나로 합친다. DLS 자료상태는 반출 당시 값이다.
 
 받은 파일에는 ISBN 열이 없다. 지원하는 ISBN 포함 파일은 같은 시트/필수 열에 `ISBN` 열을 추가한 형식이다. 소장 목록에 미식별 자료가 있으면 목록과 일치하지 않는 외부 ISBN의 소장 여부는 `UNKNOWN`이다. 이런 책의 신청은 503으로 막는다. 프론트는 상세·검색에서 `ownership: UNKNOWN`이면 신청 버튼을 비활성화하고 소장 여부 미확인 안내를 표시해야 한다.
+
+로컬 시연 서버는 개발 모드에서 `BOOKBINDER_DEMO_ASSUME_UNOWNED=true`를 설정할 수 있다. 별도 시연 DB를 사용한다. 이때 DLS 조회는 실제 자료를 그대로 보여주고, 카카오에서 조회한 유효 ISBN의 소장 여부가 미확인일 때만 신청을 허용한다. 확인된 교내 소장 도서와 구매완료 도서는 기존대로 신청할 수 없다. `/api/me`의 `X-BookBinder-Data: demo` 헤더로 화면에 시연 모드를 알린다.
 
 - `app.config['BOOK_PROVIDER']`: `search(query, page, page_size)` → `{items: [...]}`, `get(isbn)`. 항목은 `isbn, title, author, publisher, price, cover_url, pub_date(YYYY-MM-DD), description`.
 - `app.config['LIBRARY_CATALOG']`: `ownership(isbn)`(`OWNED|NOT_OWNED|UNKNOWN`)와 `books()`(소장 목록 전체). `CatalogSnapshot`이 둘 다 제공한다.

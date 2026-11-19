@@ -16,7 +16,7 @@ class AuthTests(AppCase):
         return {'X-CSRF-Token': response.get_json()['csrfToken']}
 
     def signup(self, headers, **overrides):
-        body = {'loginId': 'Newbie01', 'password': 'password1', 'password2': 'password1', 'name': '새학생', 'classNo': '2-3', 'studentNo': '10410'}
+        body = {'loginId': 'Newbie01', 'password': 'password1', 'password2': 'password1', 'name': '새학생', 'studentNo': '1407'}
         body.update(overrides)
         body = {k: v for k, v in body.items() if v is not None}
         return self.client.post('/api/auth/signup', json=body, headers=headers)
@@ -26,7 +26,7 @@ class AuthTests(AppCase):
         response = self.signup(headers)
         self.assertEqual(response.status_code, 201)
         created = response.get_json()
-        self.assertEqual((created['loginId'], created['role'], created['classNo'], created['studentNo']), ('newbie01', 'student', '2-3', '10410'))
+        self.assertEqual((created['loginId'], created['role'], created['classNo'], created['studentNo']), ('newbie01', 'student', '1-4', '1407'))
         self.assertIsInstance(created['joinedAt'], int)
         self.assertNotIn('password', str(created).lower())
         self.assertEqual(self.client.get('/api/me').status_code, 401)  # signup does not log in
@@ -34,13 +34,16 @@ class AuthTests(AppCase):
         bad = self.client.post('/api/auth/login', json={'loginId': 'newbie01', 'password': 'wrongwrong'}, headers=headers)
         self.assertEqual((bad.status_code, bad.get_json()['error']['code']), (401, 'INVALID_CREDENTIALS'))
         self.assertEqual(bad.get_json()['error']['message'], '아이디 또는 비밀번호가 맞지 않아요.')
+        rejected = self.client.post('/api/auth/admin/login', json={'loginId': 'newbie01', 'password': 'password1'}, headers=headers)
+        self.assertEqual(rejected.status_code, 403)
+        self.assertEqual(self.client.get('/api/me').status_code, 401)
         login = self.client.post('/api/auth/login', json={'loginId': '  NEWBIE01 ', 'password': 'password1'}, headers=headers)
         self.assertEqual(login.status_code, 200)
         data = login.get_json()
         self.assertEqual(data['user']['name'], '새학생')
         # The csrfToken returned by login works for a write straight away.
-        patch = self.client.patch('/api/me', json={'name': ' 새 이름 ', 'classNo': '3-12', 'studentNo': '00410'}, headers={'X-CSRF-Token': data['csrfToken']})
-        self.assertEqual((patch.status_code, patch.get_json()['name'], patch.get_json()['studentNo']), (200, '새 이름', '00410'))
+        patch = self.client.patch('/api/me', json={'name': ' 새 이름 ', 'studentNo': '3201'}, headers={'X-CSRF-Token': data['csrfToken']})
+        self.assertEqual((patch.status_code, patch.get_json()['name'], patch.get_json()['classNo'], patch.get_json()['studentNo']), (200, '새 이름', '3-2', '3201'))
         self.assertEqual(self.client.post('/api/auth/logout', headers={'X-CSRF-Token': data['csrfToken']}).status_code, 204)
         self.assertEqual(self.client.get('/api/me').status_code, 401)
         self.assertEqual(self.client.post('/api/auth/logout').status_code, 204)  # already signed out: still 204
@@ -57,17 +60,17 @@ class AuthTests(AppCase):
         body = response.get_json()['error']
         self.assertEqual((response.status_code, body['code'], body['message']), (400, 'VALIDATION_ERROR', '가입 정보를 확인해 주세요.'))
         self.assertEqual(body['fields'], {'name': '이름을 입력해 주세요.', 'loginId': '영문·숫자 4~20자로 입력해 주세요.', 'password': '8~128자로 입력해 주세요.',
-                                         'password2': '비밀번호가 서로 달라요.', 'classNo': '2-3처럼 학년-반으로 입력해 주세요.', 'studentNo': '숫자 5자리 학번을 입력해 주세요.'})
+                                         'password2': '비밀번호가 서로 달라요.', 'classNo': '입력한 학번의 학년·반과 일치해야 해요.', 'studentNo': '1407처럼 학년·반·번호로 구성된 숫자 4자리 학번을 입력해 주세요.'})
 
     def test_signup_field_rules(self):
         headers = self.csrf()
         for value in ('2반', '4-1', '2-123', '0-1'):
             self.assertIn('classNo', self.signup(headers, classNo=value).get_json()['error']['fields'], value)
-        for value in ('1041', '104100', ' 10410', '1041a', '１２３４５', '10410\n'):
+        for value in ('1041', '1400', '4407', '10410', '1041a', '１４０７'):
             self.assertIn('studentNo', self.signup(headers, studentNo=value).get_json()['error']['fields'], repr(value))
         for value in ('abc', 'a' * 21, 'with_underscore', '한글아이디'):
             self.assertIn('loginId', self.signup(headers, loginId=value).get_json()['error']['fields'], value)
-        self.assertEqual(self.signup(headers, classNo=' 1-4 ', studentNo='00410', loginId=' abcd ', password2=None).status_code, 201)
+        self.assertEqual(self.signup(headers, classNo=' 1-4 ', studentNo=' 1407 ', loginId=' abcd ', password2=None).status_code, 201)
         self.assertEqual(db.session.query(User).filter_by(login_id='abcd').one().grade_class, '1-4')
 
     def test_duplicate_login_id(self):
@@ -80,12 +83,13 @@ class AuthTests(AppCase):
 
     def test_profile_validation_and_librarian_name_only(self):
         client, headers = self.as_user('s1')
-        message = '이름, 학년/반(예: 2-3), 학번(숫자 5자리)을 확인해 주세요.'
+        message = '이름과 학번을 확인해 주세요.'
         for body in ({'name': '이름'}, {'name': '이름', 'classNo': '2-3', 'studentNo': '1234'}, {'name': '', 'classNo': '2-3', 'studentNo': '12345'},
                      {'name': '이름', 'classNo': '2-3', 'studentNo': '12345', 'role': 'librarian'}):
             response = client.patch('/api/me', json=body, headers=headers)
             self.assertEqual((response.status_code, response.get_json()['error']['message']), (400, message), body)
-        self.assertEqual(client.patch('/api/me', json={'name': '이름', 'classNo': '2-3', 'studentNo': '12345'}, headers=headers).status_code, 200)
+        legacy = client.patch('/api/me', json={'name': '이름', 'studentNo': '20315'}, headers=headers)
+        self.assertEqual((legacy.status_code, legacy.get_json()['classNo']), (200, '2-3'))
         lib, lib_headers = self.as_user('lib')
         self.assertNotIn('classNo', lib.get('/api/me').get_json())
         self.assertEqual(lib.patch('/api/me', json={'name': '새 사서'}, headers=lib_headers).get_json()['role'], 'librarian')
@@ -219,6 +223,9 @@ class AuthTests(AppCase):
         self.assertEqual(account.role, 'librarian')
         self.assertNotIn('testpass123', result.output)
         self.assertNotEqual(account.password_hash, 'testpass123')
+        login = self.client.post('/api/auth/admin/login', json={'loginId': 'library01', 'password': 'testpass123'}, headers=self.csrf())
+        self.assertEqual((login.status_code, login.get_json()['user']['role']), (200, 'librarian'))
+        self.assertEqual(self.client.get('/api/admin/books').status_code, 200)
         bad = runner.invoke(create_librarian, ['ab', '--name', '사서'], input='testpass123\ntestpass123\n')
         self.assertNotEqual(bad.exit_code, 0)
 

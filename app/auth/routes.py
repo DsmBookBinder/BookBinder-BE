@@ -61,16 +61,16 @@ def valid_text(value, maximum):
 
 
 LOGIN_ID = re.compile(r'[a-zA-Z0-9]{4,20}')
-CLASS_NO = re.compile(r'[1-3]-[0-9]{1,2}')
-STUDENT_NO = re.compile(r'[0-9]{5}')
+STUDENT_NO = re.compile(r'[1-3][1-9](?!00)[0-9]{2}')
+LEGACY_STUDENT_NO = re.compile(r'[0-9]{5}')
 NEW_PASSWORD_MESSAGE = '새 비밀번호는 8~128자여야 해요.'
 FIELD_MESSAGES = {
     'name': '이름을 입력해 주세요.',
     'loginId': '영문·숫자 4~20자로 입력해 주세요.',
     'password': '8~128자로 입력해 주세요.',
     'password2': '비밀번호가 서로 달라요.',
-    'classNo': '2-3처럼 학년-반으로 입력해 주세요.',
-    'studentNo': '숫자 5자리 학번을 입력해 주세요.',
+    'classNo': '입력한 학번의 학년·반과 일치해야 해요.',
+    'studentNo': '1407처럼 학년·반·번호로 구성된 숫자 4자리 학번을 입력해 주세요.',
 }
 
 
@@ -79,16 +79,22 @@ def text(data, key):
     return value if isinstance(value, str) else ''
 
 
-def check_profile(data):
-    """FE rules shared by signup and profile edit. Returns {field: message} for bad fields."""
+def student_profile(data, existing=None):
+    """Derive grade/class from the four-digit number; preserve an existing legacy number."""
     bad = {}
     if not valid_text(data.get('name'), 50):
         bad['name'] = FIELD_MESSAGES['name']
-    if not CLASS_NO.fullmatch(text(data, 'classNo').strip()):
-        bad['classNo'] = FIELD_MESSAGES['classNo']
-    if not STUDENT_NO.fullmatch(text(data, 'studentNo')):
+    number = text(data, 'studentNo').strip()
+    class_no = None
+    if STUDENT_NO.fullmatch(number):
+        class_no = f'{number[0]}-{number[1]}'
+    elif existing is not None and number == existing.student_no and LEGACY_STUDENT_NO.fullmatch(number):
+        class_no = existing.grade_class
+    else:
         bad['studentNo'] = FIELD_MESSAGES['studentNo']
-    return bad
+    if 'classNo' in data and (not class_no or text(data, 'classNo').strip() != class_no):
+        bad['classNo'] = FIELD_MESSAGES['classNo']
+    return number, class_no, bad
 
 
 @api.get('/auth/csrf')
@@ -114,7 +120,7 @@ def signup():
     allowed = {'loginId', 'password', 'password2', 'name', 'classNo', 'studentNo'}
     if not isinstance(data, dict) or not set(data) <= allowed:
         return error('VALIDATION_ERROR', '가입 정보를 확인해 주세요.', 400)
-    fields = check_profile(data)
+    number, class_no, fields = student_profile(data)
     login_id, password = text(data, 'loginId').strip(), text(data, 'password')
     if not LOGIN_ID.fullmatch(login_id):
         fields['loginId'] = FIELD_MESSAGES['loginId']
@@ -125,7 +131,7 @@ def signup():
     if fields:
         return error('VALIDATION_ERROR', '가입 정보를 확인해 주세요.', 400, fields)
     account = User(login_id=login_id.lower(), password_hash=generate_password_hash(password), name=data['name'].strip(), role='student',
-                   grade_class=data['classNo'].strip(), student_no=data['studentNo'])
+                   grade_class=class_no, student_no=number)
     duplicate = error('DUPLICATE_LOGIN_ID', '이미 사용 중인 아이디예요.', 409, {'loginId': '이미 사용 중인 아이디예요.'})
     if db.session.scalar(select(User.id).where(User.login_id == account.login_id)) is not None:
         return duplicate
@@ -140,6 +146,15 @@ def signup():
 
 @api.post('/auth/login')
 def login():
+    return sign_in()
+
+
+@api.post('/auth/admin/login')
+def admin_login():
+    return sign_in(required_role='librarian')
+
+
+def sign_in(required_role=None):
     denied = csrf_required()
     if denied: return denied
     data = request.get_json(silent=True)
@@ -153,6 +168,9 @@ def login():
     if not valid or account is None:
         db.session.rollback()
         return error('INVALID_CREDENTIALS', '아이디 또는 비밀번호가 맞지 않아요.', 401)
+    if required_role and account.role != required_role:
+        db.session.rollback()
+        return error('FORBIDDEN', '관리자 계정으로 로그인해 주세요.', 403)
     if g.auth_session: db.session.delete(g.auth_session)
     token, csrf = new_session(account.id)
     db.session.commit()
@@ -181,25 +199,28 @@ def me():
         denied = csrf_required()
         if denied: return denied
         data = request.get_json(silent=True)
-        message = '이름, 학년/반(예: 2-3), 학번(숫자 5자리)을 확인해 주세요.'
+        message = '이름과 학번을 확인해 주세요.'
         if not isinstance(data, dict):
             return error('VALIDATION_ERROR', message, 400)
         if g.current_user.role == 'student':
-            # The FE profile modal always sends all three values together.
-            if set(data) != {'name', 'classNo', 'studentNo'}:
+            if not {'name', 'studentNo'} <= set(data) or not set(data) <= {'name', 'studentNo', 'classNo'}:
                 return error('VALIDATION_ERROR', message, 400)
-            fields = check_profile(data)
+            number, class_no, fields = student_profile(data, g.current_user)
             if fields:
                 return error('VALIDATION_ERROR', message, 400, fields)
             g.current_user.name = data['name'].strip()
-            g.current_user.grade_class = data['classNo'].strip()
-            g.current_user.student_no = data['studentNo']
+            g.current_user.grade_class = class_no
+            g.current_user.student_no = number
         else:
             if set(data) != {'name'} or not valid_text(data['name'], 50):
                 return error('VALIDATION_ERROR', FIELD_MESSAGES['name'], 400, {'name': FIELD_MESSAGES['name']})
             g.current_user.name = data['name'].strip()
         db.session.commit()
-    return user_out(g.current_user)
+    response = make_response(user_out(g.current_user))
+    response.headers['Cache-Control'] = 'no-store'
+    if current_app.config.get('DEMO_ASSUME_UNOWNED'):
+        response.headers['X-BookBinder-Data'] = 'demo'
+    return response
 
 
 @api.patch('/me/password')
@@ -236,11 +257,11 @@ def change_password():
     return response
 
 
-@api.cli.command('create-librarian')
+@api.cli.command('create-admin')
 @click.argument('login_id')
 @click.option('--name', required=True)
 def create_librarian(login_id, name):
-    """Operator-only librarian issuing (the FE has no public librarian signup)."""
+    """Issue an administrator account from the server."""
     if not LOGIN_ID.fullmatch(login_id) or not valid_text(name, 50):
         raise click.ClickException('아이디 또는 이름을 확인해 주세요.')
     password = click.prompt('비밀번호', hide_input=True, confirmation_prompt=True)
@@ -253,4 +274,7 @@ def create_librarian(login_id, name):
     except IntegrityError as exc:
         db.session.rollback()
         raise click.ClickException('계정을 발급할 수 없습니다. 아이디 중복을 확인해 주세요.') from exc
-    click.echo('사서 계정을 발급했습니다.')
+    click.echo('관리자 계정을 발급했습니다.')
+
+
+api.cli.add_command(create_librarian, 'create-librarian')

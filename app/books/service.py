@@ -63,9 +63,12 @@ def ownership(isbn, status=None):
     if catalog is None:
         return 'UNKNOWN'
     try:
-        return catalog.ownership(isbn)
+        result = catalog.ownership(isbn)
     except (*SOURCE_ERRORS, ValueError):
         return 'UNKNOWN'
+    if result == 'UNKNOWN' and current_app.config.get('DEMO_ASSUME_UNOWNED'):
+        return 'NOT_OWNED'
+    return result
 
 
 def is_owned(isbn, status=None):
@@ -166,6 +169,8 @@ def request_state(owned, mine, status):
 
 def search(user_id, query, scope, sort, page, size):
     from app.serializers import book_out
+    if scope == 'all' and not query:
+        return {'items': [], 'page': 1, 'pageSize': size, 'total': 0}
     counts = request_counts()
     mine = set(db.session.scalars(select(RequestedBook.isbn).join(BookRequest, BookRequest.requested_book_id == RequestedBook.id).where(BookRequest.user_id == user_id)))
     words = query.lower().split()

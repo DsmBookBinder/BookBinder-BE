@@ -70,7 +70,7 @@ class AdminTestBase(AppCase):
 class AdminListTests(AdminTestBase):
     def test_roles_and_csrf(self):
         self.assertEqual(self.app.test_client().get('/api/admin/books').status_code, 401)
-        self.assertEqual(self.message(self.call('s1', 'get', '/api/admin/books'), 403), '사서 선생님 전용 기능이에요.')
+        self.assertEqual(self.message(self.call('s1', 'get', '/api/admin/books'), 403), '관리자 전용 기능이에요.')
         client, _ = self.as_user('lib')
         self.assertEqual(self.message(client.post('/api/admin/books/status', json={}), 403), '요청을 확인할 수 없어요. 새로고침 후 다시 시도해 주세요.')
         self.assertEqual(self.call('lib', 'get', '/api/admin/books').headers['Cache-Control'], 'no-store')

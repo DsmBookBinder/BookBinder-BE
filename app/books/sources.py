@@ -10,6 +10,10 @@ def _choice(name):
 
 def configure_sources(app):
     """Load configured sources. The fixture stays restricted to debug mode."""
+    demo_assumption = os.getenv('BOOKBINDER_DEMO_ASSUME_UNOWNED', '').strip().lower() in ('1', 'true')
+    if demo_assumption and not app.debug:
+        raise RuntimeError('BOOKBINDER_DEMO_ASSUME_UNOWNED is available only in the local development mode')
+    app.config['DEMO_ASSUME_UNOWNED'] = demo_assumption
     for key, factory in (('BOOK_PROVIDER', FixtureProvider), ('LIBRARY_CATALOG', fixture_catalog)):
         if app.config.get(key) is not None:
             continue

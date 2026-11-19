@@ -47,6 +47,25 @@ class ClientDataTests(AppCase):
         self.assertEqual(self.call('s1', 'post', '/api/requests', json={'bookId': SOSEON}).status_code, 409)
         self.assertEqual(self.call('s1', 'post', '/api/requests', json={'bookId': CONVENIENCE}).status_code, 201)
 
+    def test_demo_admits_unknown_isbn_and_sends_it_through_admin_review(self):
+        rows = [('LOCAL', 'ISBN 없는 소장 도서', None, '출판사', 2024, None),
+                ('KNOWN', '확인된 소장 도서', None, '출판사', 2024, CONVENIENCE)]
+        self.make_catalogue(rows, (*REQUIRED, 'ISBN'))
+        with patch.dict('os.environ', {'BOOKBINDER_DEMO_ASSUME_UNOWNED': 'true'}):
+            with self.assertRaises(RuntimeError):
+                configure_sources(self.app)
+            self.app.debug = True
+            configure_sources(self.app)
+            self.app.debug = False
+        self.assertEqual(self.call('s1', 'get', '/api/me').headers['X-BookBinder-Data'], 'demo')
+        self.assertEqual(self.call('s1', 'get', f'/api/books/{SOSEON}').get_json()['ownership'], 'NOT_OWNED')
+        self.assertEqual(self.call('s1', 'post', '/api/requests', json={'bookId': CONVENIENCE}).status_code, 409)
+        self.assertEqual(self.call('s1', 'post', '/api/requests', json={'bookId': SOSEON}).status_code, 201)
+        items = self.call('lib', 'get', '/api/admin/books').get_json()['items']
+        self.assertEqual((items[0]['book']['id'], items[0]['review']['status']), (SOSEON, 'pending'))
+        self.set_status(SOSEON, 'approved')
+        self.assertEqual(self.call('s1', 'get', '/api/me/notifications').get_json()['items'][0]['status'], 'approved')
+
     def test_import_rejects_malformed_workbook_with_row_number(self):
         with self.assertRaisesRegex(RuntimeError, '2행.*ISBN'):
             self.make_catalogue([('TEST', '도서', None, '출판사', 2024, 'invalid')], (*REQUIRED, 'ISBN'))

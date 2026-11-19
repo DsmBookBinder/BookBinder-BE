@@ -19,9 +19,9 @@ class BookRouteTests(AppCase):
         for url in ('/api/books', f'/api/books/{SOSEON}', '/api/books/popular'):
             self.assertEqual(client.get(url).status_code, 401, url)
 
-    def test_search_without_query_lists_known_books_with_total(self):
-        body = self.search()
-        # No query: only owned catalogue + requested books are known (no provider call).
+    def test_search_without_query_only_lists_owned_scope(self):
+        self.assertEqual(self.search(scope='all'), {'items': [], 'page': 1, 'pageSize': 5, 'total': 0})
+        body = self.search(scope='owned')
         self.assertEqual((body['page'], body['pageSize'], body['total']), (1, 5, 8))
         self.assertTrue(all(item['owned'] for item in body['items']))
         self.assertEqual(set(body['items'][0]) - {'cover'}, {'id', 'isbn', 'title', 'author', 'publisher', 'year', 'pubDate', 'price', 'description',
