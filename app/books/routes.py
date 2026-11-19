@@ -2,7 +2,7 @@
 from flask import Blueprint, g, request
 
 from app.books.isbn import normalize_isbn
-from app.books.providers import ProviderError, ProviderTimeout, ProviderUnavailable
+from app.books.providers import ProviderError, ProviderRateLimited, ProviderTimeout
 from app.errors import AUTH_REQUIRED, BOOK_NOT_FOUND, FILTER_INVALID, PROVIDER_MESSAGE, error, fail
 
 books_api = Blueprint("books", __name__, url_prefix="/api")
@@ -21,6 +21,8 @@ def authenticated():
 
 
 def provider_error(exc):
+    if isinstance(exc, ProviderRateLimited):
+        return error("BOOK_PROVIDER_RATE_LIMITED", PROVIDER_MESSAGE, 429)
     if isinstance(exc, ProviderTimeout):
         return error("BOOK_PROVIDER_TIMEOUT", PROVIDER_MESSAGE, 504)
     if isinstance(exc, ProviderError):
@@ -54,7 +56,7 @@ def search_books():
         return fail(FILTER_INVALID)
     try:
         return service.search(current_id(), query, scope, sort, page, size)
-    except (ProviderUnavailable, ProviderError, ProviderTimeout) as exc:
+    except service.SOURCE_ERRORS as exc:
         return provider_error(exc)
 
 
@@ -75,12 +77,15 @@ def book_detail(book_id):
     from app.books import service
     if not authenticated():
         return fail(AUTH_REQUIRED)
+    if book_id.startswith('dls-'):
+        data = service.catalogue_detail(book_id)
+        return fail(BOOK_NOT_FOUND) if data is None else data
     try:
         isbn = normalize_isbn(book_id)
     except ValueError:
         return fail(BOOK_NOT_FOUND)
     try:
         data = service.detail(current_id(), isbn)
-    except (ProviderUnavailable, ProviderError, ProviderTimeout) as exc:
+    except service.SOURCE_ERRORS as exc:
         return provider_error(exc)
     return fail(BOOK_NOT_FOUND) if data is None else data

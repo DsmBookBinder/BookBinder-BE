@@ -46,12 +46,16 @@ def requester_out(user):
 def book_out(meta, owned):
     """meta: dict with isbn,title,author,publisher,price,cover_url,pub_date(date|None),description."""
     pub = meta.get('pub_date')
-    data = {'id': meta['isbn'], 'isbn': meta['isbn'], 'title': meta['title'], 'author': meta['author'],
+    data = {'id': meta.get('id', meta['isbn']), 'isbn': meta['isbn'], 'title': meta['title'], 'author': meta['author'],
             'publisher': meta['publisher'], 'year': pub.year if pub else meta.get('year'),
             'pubDate': pub.isoformat() if pub else None, 'price': meta.get('price'),
             'description': meta.get('description') or '', 'owned': bool(owned)}
     if meta.get('cover_url'):
         data['cover'] = meta['cover_url']
+    if meta.get('material_type'):
+        data['materialType'] = meta['material_type']
+    if meta.get('library_status'):
+        data['libraryStatus'] = meta['library_status']
     return data
 
 

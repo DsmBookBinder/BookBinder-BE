@@ -1,17 +1,14 @@
-"""Book lookup, ownership and the FE search rules (selectors.ts / Search.tsx).
-
-A book's id is its normalised ISBN-13. A "book" is known from the school's own table
-(requested_books, authoritative for price/state), the external provider, or the owned-catalogue.
-"""
+"""Search the provider, requested books, and the school catalogue."""
 from datetime import date
 from flask import current_app
 from sqlalchemy import func, select
 from app.db import db
+from app.books.catalog import search_key
 from app.books.isbn import normalize_isbn
 from app.books.models import BookRequest, RequestedBook
-from app.books.providers import ProviderError, ProviderTimeout, ProviderUnavailable
+from app.books.providers import ProviderError, ProviderRateLimited, ProviderTimeout, ProviderUnavailable
 
-SOURCE_ERRORS = (ProviderUnavailable, ProviderError, ProviderTimeout)
+SOURCE_ERRORS = (ProviderUnavailable, ProviderError, ProviderRateLimited, ProviderTimeout)
 PROVIDER_PAGE_SIZE = 100
 MAX_PROVIDER_PAGES = 50  # safety cap: 5,000 hits per search
 
@@ -32,7 +29,7 @@ def row_meta(row):
             'cover_url': row.cover_url, 'pub_date': row.pub_date, 'description': row.description}
 
 
-def source_meta(item):
+def source_meta(item, *, catalogue=False):
     """Validate one provider/catalogue item; None when unusable (never invent values)."""
     if not isinstance(item, dict):
         return None
@@ -40,10 +37,12 @@ def source_meta(item):
         isbn = normalize_isbn(item.get('isbn'))
     except ValueError:
         return None
-    if any(not isinstance(item.get(k), str) or not item[k].strip() for k in ('title', 'author', 'publisher')):
+    if any(not isinstance(item.get(k), str) for k in ('title', 'author', 'publisher')) or not item['title'].strip():
+        return None
+    if not catalogue and (not item['author'].strip() or not item['publisher'].strip()):
         return None
     price = item.get('price')
-    if price is not None and (type(price) is not int or price < 0):
+    if price is not None and (type(price) is not int or not 0 <= price <= 2147483647):
         price = None
     description = item.get('description')
     cover = item.get('cover_url')
@@ -51,22 +50,26 @@ def source_meta(item):
             'publisher': item['publisher'].strip(), 'price': price,
             'cover_url': cover if isinstance(cover, str) and cover else None,
             'pub_date': parse_date(item.get('pub_date')),
+            'year': item.get('year'),
+            'material_type': item.get('material_type'),
+            'library_status': item.get('library_status'),
             'description': description if isinstance(description, str) else None}
 
 
-def catalog_owned(isbn):
-    """Display-only ownership: unknown/unavailable counts as not owned (requests re-check strictly)."""
+def ownership(isbn, status=None):
+    if status == 'purchased':
+        return 'OWNED'
     catalog = current_app.config.get('LIBRARY_CATALOG')
     if catalog is None:
-        return False
+        return 'UNKNOWN'
     try:
-        return catalog.ownership(isbn) == 'OWNED'
+        return catalog.ownership(isbn)
     except (*SOURCE_ERRORS, ValueError):
-        return False
+        return 'UNKNOWN'
 
 
 def is_owned(isbn, status=None):
-    return status == 'purchased' or catalog_owned(isbn)
+    return ownership(isbn, status) == 'OWNED'
 
 
 def request_counts():
@@ -77,7 +80,7 @@ def request_counts():
 def relevance(meta, words):
     """FE relevance(): every word must hit; title +3, author +2, publisher/isbn/description +1."""
     score = 0
-    other = f"{meta['publisher']} {meta['isbn']} {meta.get('description') or ''}".lower()
+    other = f"{meta['publisher']} {meta['isbn'] or ''} {meta.get('description') or ''}".lower()
     for word in words:
         if word in meta['title'].lower():
             score += 3
@@ -96,8 +99,9 @@ def _provider_items(query):
         raise ProviderUnavailable()
     # Read every provider page first; de-duplication, the all-words filter, sorting and API paging happen afterwards.
     found = {}
+    page_size = getattr(provider, 'max_page_size', PROVIDER_PAGE_SIZE)
     for page in range(1, MAX_PROVIDER_PAGES + 1):
-        result = provider.search(query, page, PROVIDER_PAGE_SIZE)
+        result = provider.search(query, page, page_size)
         items = result.get('items') if isinstance(result, dict) else None
         if not isinstance(items, list):
             raise ProviderError()
@@ -106,7 +110,10 @@ def _provider_items(query):
             if meta and meta['isbn'] not in found:
                 found[meta['isbn']] = meta
         total = result.get('total')
-        if not items or (type(total) is int and page * PROVIDER_PAGE_SIZE >= total) or (type(total) is not int and len(items) < PROVIDER_PAGE_SIZE):
+        has_next = result.get('has_next')
+        if not items or has_next is False:
+            break
+        if has_next is not True and (page * page_size >= total if type(total) is int else len(items) < page_size):
             break
     return found
 
@@ -121,7 +128,10 @@ def candidates(query, scope):
     catalog_meta = {}
     if catalog is not None and hasattr(catalog, 'books'):
         for item in catalog.books():
-            meta = source_meta(item)
+            if item.get('id') and item.get('isbn') is None:
+                catalog_meta[item['id']] = item
+                continue
+            meta = source_meta(item, catalogue=True)
             if meta:
                 catalog_meta.setdefault(meta['isbn'], meta)
     order = {}
@@ -129,9 +139,9 @@ def candidates(query, scope):
         order.update(dict.fromkeys(source))
     merged = []
     for isbn in order:
-        meta = {}
         # The school table owns the price; other sources only fill blank descriptive fields.
         priority = [s[isbn] for s in (db_meta, provider_meta, catalog_meta) if isbn in s]
+        meta = {key: priority[0][key] for key in ('isbn', 'title', 'author', 'publisher')}
         for source in priority:
             for key, value in source.items():
                 if key == 'price':
@@ -162,14 +172,17 @@ def search(user_id, query, scope, sort, page, size):
     entries = []
     for meta, row in candidates(query, scope):
         status = row.status if row else None
-        owned = is_owned(meta['isbn'], status)
+        book_ownership = 'OWNED' if meta.get('id', '').startswith('dls-') else ownership(meta['isbn'], status)
+        owned = book_ownership == 'OWNED'
         if scope == 'owned' and not owned:
             continue
         score = relevance(meta, words) if words else 1
+        if not score and owned and search_key(query) in search_key(meta['title']):
+            score = 3
         if score <= 0:
             continue
         count = counts.get(row.id, 0) if row else 0
-        entries.append((meta, row, owned, score, count))
+        entries.append((meta, row, book_ownership, score, count))
     if sort == 'popular':
         entries.sort(key=lambda e: (-e[4], -e[3]))
     else:
@@ -177,8 +190,10 @@ def search(user_id, query, scope, sort, page, size):
     total = len(entries)
     page = min(page, max(1, -(-total // size)))
     items = []
-    for meta, row, owned, _score, count in entries[(page - 1) * size:page * size]:
+    for meta, row, book_ownership, _score, count in entries[(page - 1) * size:page * size]:
+        owned = book_ownership == 'OWNED'
         item = book_out(meta, owned)
+        item['ownership'] = book_ownership
         item['requestCount'] = count
         item['requestState'] = request_state(owned, meta['isbn'] in mine, row.status if row else None)
         items.append(item)
@@ -201,8 +216,10 @@ def detail(user_id, isbn):
                 provider_error = exc  # keep it; the school catalogue may still know the book
         if meta is None:
             catalog = current_app.config.get('LIBRARY_CATALOG')
-            if catalog is not None and hasattr(catalog, 'books'):
-                meta = next((m for m in (source_meta(i) for i in catalog.books()) if m and m['isbn'] == isbn), None)
+            if hasattr(catalog, 'get'):
+                meta = source_meta(catalog.get(isbn), catalogue=True)
+            elif hasattr(catalog, 'books'):
+                meta = next((source_meta(i, catalogue=True) for i in catalog.books() if i.get('isbn') == isbn), None)
         if meta is None and provider_error is not None:
             raise provider_error  # catalogue did not have it either: report the original provider failure
         if meta is None and provider is None:
@@ -211,8 +228,10 @@ def detail(user_id, isbn):
         return None
     count = db.session.scalar(select(func.count(BookRequest.id)).where(BookRequest.requested_book_id == row.id)) if row else 0
     mine = bool(row) and db.session.scalar(select(func.count(BookRequest.id)).where(BookRequest.requested_book_id == row.id, BookRequest.user_id == user_id)) > 0
-    owned = is_owned(isbn, row.status if row else None)
+    book_ownership = ownership(isbn, row.status if row else None)
+    owned = book_ownership == 'OWNED'
     data = book_out(meta, owned)
+    data['ownership'] = book_ownership
     data['requestCount'] = count
     data['requestState'] = request_state(owned, mine, row.status if row else None)
     review = None
@@ -222,6 +241,15 @@ def detail(user_id, isbn):
             review['reason'] = row.reject_reason
     data['review'] = review
     return data
+
+
+def catalogue_detail(book_id):
+    from app.serializers import book_out
+    catalog = current_app.config.get('LIBRARY_CATALOG')
+    item = catalog.get(book_id) if hasattr(catalog, 'get') else None
+    if item is None:
+        return None
+    return {**book_out(item, True), 'ownership': 'OWNED', 'requestCount': 0, 'requestState': 'owned', 'review': None}
 
 
 def popular(limit):

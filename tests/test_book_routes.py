@@ -25,7 +25,7 @@ class BookRouteTests(AppCase):
         self.assertEqual((body['page'], body['pageSize'], body['total']), (1, 5, 8))
         self.assertTrue(all(item['owned'] for item in body['items']))
         self.assertEqual(set(body['items'][0]) - {'cover'}, {'id', 'isbn', 'title', 'author', 'publisher', 'year', 'pubDate', 'price', 'description',
-                                                             'owned', 'requestCount', 'requestState'})
+                                                         'owned', 'requestCount', 'requestState', 'ownership'})
 
     def test_search_words_scoring_and_all_words_rule(self):
         # 한강: 소년이 온다 + 채식주의자 by author (+2). Title hit scores higher than author hit.

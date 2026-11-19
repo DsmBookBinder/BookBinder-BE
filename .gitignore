@@ -9,6 +9,8 @@ venv/
 .env.*
 !.env.example
 instance/
+*.xlsx
+*.zip
 *.db
 *.sqlite
 *.sqlite3

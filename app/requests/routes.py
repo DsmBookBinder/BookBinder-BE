@@ -6,7 +6,7 @@ from app.db import db
 from app.books import service
 from app.books.isbn import normalize_isbn
 from app.books.models import BookRequest, Notification, RequestedBook, utcnow
-from app.books.providers import ProviderError, ProviderTimeout, ProviderUnavailable
+from app.books.providers import ProviderError, ProviderUnavailable
 from app.books.routes import provider_error
 from app.errors import (AUTH_REQUIRED, BOOK_NOT_FOUND, CATALOG_MESSAGE, CSRF_FAILED, FORBIDDEN_STUDENT, error, fail)
 from app.serializers import book_out, ms, request_out, review_out
@@ -52,18 +52,10 @@ def catalog_unavailable():
     return error('LIBRARY_CATALOG_UNAVAILABLE', CATALOG_MESSAGE, 503)
 
 
-def catalog_ownership(isbn, row):
-    """OWNED if purchased or the catalogue says so; None when the catalogue cannot say."""
-    if row is not None and row.status == 'purchased':
-        return 'OWNED'
-    catalog = current_app.config.get('LIBRARY_CATALOG')
-    return None if catalog is None else catalog.ownership(isbn)
-
-
 def create_once(isbn, uid):
     # FE requestBook order: owned -> already requested -> rejected. Catalogue "unknown" blocks last (fail closed).
     row = db.session.execute(select(RequestedBook).where(RequestedBook.isbn == isbn).with_for_update()).scalar_one_or_none()
-    ownership = catalog_ownership(isbn, row)
+    ownership = service.ownership(isbn, row.status if row is not None else None)
     if ownership == 'OWNED':
         raise Rejected(error('OWNED_BOOK', '이미 교내에 소장 중인 도서예요.', 409))
     if row is not None and db.session.scalar(select(func.count(BookRequest.id)).where(BookRequest.requested_book_id == row.id, BookRequest.user_id == uid)):
@@ -80,7 +72,10 @@ def create_once(isbn, uid):
         if raw is None:
             raise Rejected(fail(BOOK_NOT_FOUND))
         meta = service.source_meta(raw)
-        if meta is None:
+        if (meta is None or meta['isbn'] != isbn
+                or any(len(meta[field_name]) > limit for field_name, limit in
+                       (('title', 200), ('author', 100), ('publisher', 100)))
+                or len(meta['cover_url'] or '') > 500):
             raise ProviderError()
         # Only a newly created row takes the provider price; librarian-entered prices are never overwritten.
         row = RequestedBook(isbn=isbn, title=meta['title'], author=meta['author'], publisher=meta['publisher'], price=meta['price'],
@@ -125,7 +120,7 @@ def create_request():
     except Rejected as exc:
         db.session.rollback()
         return exc.response
-    except (ProviderUnavailable, ProviderError, ProviderTimeout) as exc:
+    except service.SOURCE_ERRORS as exc:
         db.session.rollback()
         return provider_error(exc)
     except Exception:

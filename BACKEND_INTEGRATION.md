@@ -6,7 +6,7 @@ BookBinder-FE(`main` d87ce56 + `fix/2-student-registration`의 학생 전용 가
 ## 계약 요약
 
 - JSON 키 camelCase, 상태(`pending|approved|rejected|purchased`)·역할(`student|librarian`) 소문자, 시간은 UTC epoch ms 정수, 모든 id는 문자열.
-- 도서 id = 정규화된 ISBN-13. **처리 상태는 도서 단위**(`requested_books.status`)이며 한 책을 신청한 모든 학생에게 같이 적용되고 모두에게 알림이 간다.
+- 신청 가능한 도서 id는 정규화된 ISBN-13이다. ISBN 없는 교내 자료는 `dls-`로 시작하는 조회용 id와 `isbn: null`을 반환한다. **처리 상태는 도서 단위**(`requested_books.status`)이며 한 책을 신청한 모든 학생에게 같이 적용되고 모두에게 알림이 간다.
 - 반려된 책은 누구도 다시 신청할 수 없고, 구매완료된 책은 교내 소장으로 취급한다. 되돌리기는 **구매 상태 때문에 생긴 소장 판정만** 해제한다. 교내 소장 목록에 있는 책은 `is_owned()`가 계속 `owned: true`를 반환한다.
 - 오류: `{"error": {"code", "message", "fields"?}}`, 메시지는 FE 문구 그대로.
 - 날짜 경계(기간 필터, 학기, 이번 주, 월별)는 Asia/Seoul 기준.
@@ -30,12 +30,24 @@ BookBinder-FE(`main` d87ce56 + `fix/2-student-registration`의 학생 전용 가
 
 ## 도서 데이터 연결
 
-`BOOK_PROVIDER`, `LIBRARY_CATALOG` 환경변수는 `none`(기본, 503) 또는 `fixture`이다. **fixture는 개발 전용**(FE 샘플 24권, `app/books/fixture_data/books.json`)이며 `FLASK_DEBUG=1`일 때만 켜지고 운영에서는 거부된다. 실제 외부 공급자와 DLS 소장 파일 반입은 접근 정보가 없어 구현하지 않았다.
+`BOOK_PROVIDER=kakao`와 `KAKAO_REST_API_KEY`를 서버 환경에 설정한다. 공급자 설정이 없고 키가 있으면 Kakao를 사용하고, 명시적으로 `BOOK_PROVIDER=none`을 설정하면 끈다. Kakao 응답의 `price`(정가)를 사용한다. **fixture는 개발 전용**(FE 샘플 24권)이며 `FLASK_DEBUG=1`에서만 동작한다.
+
+### DLS 반입
+
+1. DLS에서 반출한 원본 XLSX를 서버가 읽을 수 있는 비공개 경로에 보관한다(로컬에서는 `instance/dls-catalog.xlsx`).
+2. `LIBRARY_CATALOG=dls`와 `DLS_CATALOG_XLSX` 절대 경로를 설정하고 앱을 시작한다. 시작할 때마다 `리스트 반출` 시트를 전부 검증해 메모리에 읽는다. 파일이 비어 있거나 열 구조 또는 값이 잘못된 경우 시작 실패로 표시한다. 기존 앱이 실행 중이면 새 파일을 먼저 별도 프로세스에서 검증하고 파일 교체 후 프로세스를 재시작한다.
+3. 로그인한 계정에서 `GET /api/books?scope=owned&q=어린왕자`로 검색하고 응답의 `id`로 상세를 조회한다. 등록번호 원문은 응답에 넣지 않는다. 같은 등록번호·제목·저자·출판사·출판년도의 반복 행만 하나로 합친다. DLS 자료상태는 반출 당시 값이다.
+
+받은 파일에는 ISBN 열이 없다. 지원하는 ISBN 포함 파일은 같은 시트/필수 열에 `ISBN` 열을 추가한 형식이다. 소장 목록에 미식별 자료가 있으면 목록과 일치하지 않는 외부 ISBN의 소장 여부는 `UNKNOWN`이다. 이런 책의 신청은 503으로 막는다. 프론트는 상세·검색에서 `ownership: UNKNOWN`이면 신청 버튼을 비활성화하고 소장 여부 미확인 안내를 표시해야 한다.
 
 - `app.config['BOOK_PROVIDER']`: `search(query, page, page_size)` → `{items: [...]}`, `get(isbn)`. 항목은 `isbn, title, author, publisher, price, cover_url, pub_date(YYYY-MM-DD), description`.
 - `app.config['LIBRARY_CATALOG']`: `ownership(isbn)`(`OWNED|NOT_OWNED|UNKNOWN`)와 `books()`(소장 목록 전체). `CatalogSnapshot`이 둘 다 제공한다.
 - 소장 확인 불가(UNKNOWN/미설정)는 신청을 막는다(fail closed).
 - 전체 도서의 범위: 공급자 검색 결과(검색어가 있을 때) + 교내 소장 목록 + 이미 신청된 책.
+
+### 학교 발주 양식
+
+사서가 `POST /api/admin/books/export`에 기존 필터와 함께 `{"format":"school"}`을 보내면 학교 양식의 구입 예정 도서 목록을 내려받는다. 승인됐고 구매 수량이 1 이상인 책의 정가, 수량, 소계와 총합을 포함한다. 가격이 미정인 책이 포함된 경우 `409 PRICE_REQUIRED`를 반환한다. 기본 다운로드는 기존 사서용 신청 현황을 유지한다.
 
 ## DB
 

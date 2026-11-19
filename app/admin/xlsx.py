@@ -6,6 +6,8 @@ import re
 from io import BytesIO
 from zipfile import ZipFile, ZIP_DEFLATED
 from xml.etree.ElementTree import Element, SubElement, tostring
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font
 
 NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
 XML_SPACE = '{http://www.w3.org/XML/1998/namespace}space'
@@ -69,5 +71,41 @@ def workbook(header, rows, widths, sheet='Sheet1'):
         archive.writestr('xl/_rels/workbook.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>')
         archive.writestr('xl/styles.xml', STYLES)
         archive.writestr('xl/worksheets/sheet1.xml', tostring(root, encoding='utf-8', xml_declaration=True))
+    output.seek(0)
+    return output
+
+
+def school_order_workbook(books):
+    """Match the library's seven-column order form, with editable quantity totals."""
+    document = Workbook()
+    sheet = document.active
+    sheet.title = '구입 예정 도서 목록'
+    sheet.merge_cells('A1:G1')
+    sheet['A1'] = '구입 예정 도서 목록'
+    sheet['A1'].font = Font(bold=True, size=16)
+    sheet['A1'].alignment = Alignment(horizontal='center')
+    sheet.append([None])
+    sheet.append(['번호', '도서명', '지은이', '출판사', '정가(할인가X)', '수량(권)', '계'])
+    for cell in sheet[3]:
+        cell.font = Font(bold=True)
+    for number, (title, author, publisher, price, quantity) in enumerate(books, 1):
+        row = number + 3
+        sheet.append([number, None, None, None, price, quantity, f'=E{row}*F{row}'])
+        for position, value in enumerate((title, author, publisher), 2):
+            cell = sheet.cell(row, position, value)
+            cell.data_type = 's'
+    end = 3 + len(books)
+    sheet.append(['합계', None, None, None, None,
+                  f'=SUM(F4:F{end})' if books else 0,
+                  f'=SUM(G4:G{end})' if books else 0])
+    sheet.merge_cells(start_row=end + 1, start_column=1, end_row=end + 1, end_column=5)
+    for row in sheet.iter_rows(min_row=4, min_col=5, max_col=7):
+        for cell in row:
+            cell.number_format = '#,##0'
+    for i, width in enumerate((8, 50, 24, 20, 18, 12, 16)):
+        sheet.column_dimensions[column(i)].width = width
+    sheet.freeze_panes = 'A4'
+    output = BytesIO()
+    document.save(output)
     output.seek(0)
     return output

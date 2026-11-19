@@ -92,7 +92,7 @@ paths:
     get:
       summary: 도서 검색(검색어 없이도 가능)
       parameters:
-        - {in: query, name: q, schema: {type: string, maxLength: 100}, description: 공백으로 나눈 모든 단어가 들어 있어야 한다}
+        - {in: query, name: q, schema: {type: string, maxLength: 100}, description: 보통 모든 단어가 일치해야 하며 소장 도서 제목은 공백을 무시해서도 검색한다}
         - {in: query, name: scope, schema: {type: string, enum: [all, owned], default: all}}
         - {in: query, name: sort, schema: {type: string, enum: [relevance, popular], default: relevance}}
         - {in: query, name: page, schema: {type: integer, minimum: 1, default: 1}}
@@ -100,6 +100,7 @@ paths:
       responses:
         '200': {description: OK, content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: '#/components/schemas/SearchItem'}}, page: {type: integer}, pageSize: {type: integer}, total: {type: integer}}, required: [items, page, pageSize, total]}}}}
         '502': {description: BOOK_PROVIDER_ERROR — 공급자가 잘못된 응답을 줌, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '429': {description: BOOK_PROVIDER_RATE_LIMITED — 공급자 요청 제한, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
         '503': {description: BOOK_PROVIDER_UNAVAILABLE — 도서 공급자가 연결되지 않음, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
         '504': {description: BOOK_PROVIDER_TIMEOUT — 공급자 응답 시간 초과, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
   /api/books/popular:
@@ -111,7 +112,7 @@ paths:
         '200': {description: OK, content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {type: object, properties: {book: {$ref: '#/components/schemas/Book'}, count: {type: integer}}}}}}}}}
   /api/books/{bookId}:
     get:
-      summary: 도서 상세(bookId = ISBN-10/13, 하이픈 허용)
+      summary: 도서 상세(bookId = ISBN-10/13 또는 교내 검색 결과의 dls- ID)
       parameters:
         - {in: path, name: bookId, required: true, schema: {type: string}}
       responses:
@@ -126,6 +127,7 @@ paths:
                     properties:
                       review: {type: object, nullable: true, properties: {status: {$ref: '#/components/schemas/Status'}, reason: {type: string}}}
         '404': {$ref: '#/components/responses/NotFound'}
+        '429': {description: BOOK_PROVIDER_RATE_LIMITED — 공급자 요청 제한, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
   /api/requests:
     post:
       summary: 도서 신청(학생). 기존 {isbn} 키도 받는다
@@ -142,6 +144,7 @@ paths:
       responses:
         '201': {description: 신청됨, content: {application/json: {schema: {type: object, properties: {request: {$ref: '#/components/schemas/BookRequest'}, review: {$ref: '#/components/schemas/Review'}}}}}}
         '409': {description: 'OWNED_BOOK / DUPLICATE_REQUEST / REJECTED_BOOK(다른 학생의 신청이 반려된 책 포함)', content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '429': {description: BOOK_PROVIDER_RATE_LIMITED — 공급자 요청 제한, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
         '503': {description: 공급자 또는 소장 목록 확인 불가(LIBRARY_CATALOG_UNAVAILABLE 포함), content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
   /api/me/requests:
     get:
@@ -272,11 +275,13 @@ paths:
       summary: 신청 도서 목록 엑셀(필터·정렬 결과 전체). 파일명 신청도서목록_YYYYMMDD.xlsx
       parameters:
         - {$ref: '#/components/parameters/CsrfToken'}
-      description: '열: 도서명, 저자, 출판사, ISBN, 가격, 신청 수, 신청 학생(이름(학년반)), 최근 신청일, 검토 결과, 구매 여부, 반려 사유. 학생 이름·학년반이 포함된다.'
+      description: 'report(기본)는 기존 신청 현황이며 학생 이름·학년반이 포함된다. school은 승인 상태이며 구매 수량이 양수인 책으로 구입 예정 도서 목록을 만든다. 번호, 도서명, 지은이, 출판사, 정가, 수량, 계와 합계를 내보낸다. school의 status는 생략, 빈 값, all, approved 중 하나여야 하며 학생 정보는 출력하지 않는다.'
       requestBody:
-        content: {application/json: {schema: {type: object, properties: {status: {type: string}, classNo: {type: string}, from: {type: string}, to: {type: string}, q: {type: string}, sort: {type: string, enum: [latest, count, title]}}}}}
+        content: {application/json: {schema: {type: object, properties: {format: {type: string, enum: [report, school], default: report}, status: {type: string}, classNo: {type: string}, from: {type: string}, to: {type: string}, q: {type: string}, sort: {type: string, enum: [latest, count, title]}}}}}
       responses:
         '200': {description: xlsx, content: {application/vnd.openxmlformats-officedocument.spreadsheetml.sheet: {schema: {type: string, format: binary}}}}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '409': {description: PRICE_REQUIRED — school에 포함될 도서의 정가가 입력되지 않음, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
   /api/admin/budget:
     get:
       summary: 예산
@@ -347,8 +352,8 @@ components:
     Book:
       type: object
       properties:
-        id: {type: string, description: 정규화된 ISBN-13}
-        isbn: {type: string}
+        id: {type: string, description: 정규화된 ISBN-13 또는 ISBN 없는 교내 자료의 dls- ID}
+        isbn: {type: string, nullable: true}
         title: {type: string}
         author: {type: string}
         publisher: {type: string}
@@ -357,6 +362,8 @@ components:
         price: {type: integer, nullable: true, description: null은 가격 미정이며 0원과 다르다}
         description: {type: string}
         owned: {type: boolean, description: 소장 목록에 있거나 도서 상태가 purchased}
+        materialType: {type: string, description: 교내 자료유형 원문}
+        libraryStatus: {type: string, description: 반출 당시 교내 자료상태 원문}
         cover: {type: string}
       required: [id, isbn, title, author, publisher, price, description, owned]
     SearchItem:
@@ -366,6 +373,7 @@ components:
           properties:
             requestCount: {type: integer}
             requestState: {type: string, enum: [owned, requested, rejected, available]}
+            ownership: {type: string, enum: [OWNED, NOT_OWNED, UNKNOWN], description: 'UNKNOWN이면 requestState가 available이어도 신규 신청 불가'}
     BookRequest:
       type: object
       properties:

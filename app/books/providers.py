@@ -25,3 +25,7 @@ class ProviderError(Exception):
 
 class ProviderTimeout(Exception):
     pass
+
+
+class ProviderRateLimited(Exception):
+    pass

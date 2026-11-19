@@ -4,7 +4,7 @@ from app.errors import AUTH_REQUIRED, CSRF_FAILED, FORBIDDEN_LIBRARIAN, INTERNAL
 from app.requests.routes import field
 from app.serializers import kst_now
 from app.admin import services
-from app.admin.xlsx import workbook
+from app.admin.xlsx import school_order_workbook, workbook
 
 admin_api = Blueprint('admin', __name__, url_prefix='/api/admin')
 XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
@@ -87,7 +87,17 @@ def quantity(book_id):
 
 @admin_api.post('/books/export')
 def export_books():
-    return download(services.export_books(optional_json_body()), BOOK_HEADER, BOOK_WIDTHS, '신청도서목록')
+    body = optional_json_body()
+    export_format = body.get('format', 'report')
+    if export_format == 'school':
+        if body.get('status') not in (None, '', 'all', 'approved'):
+            raise services.APIError()
+        output = school_order_workbook(services.school_order_rows(body))
+        filename = f'구입예정도서목록_{kst_now():%Y%m%d}.xlsx'
+        return send_file(output, mimetype=XLSX, as_attachment=True, download_name=filename)
+    if export_format != 'report':
+        raise services.APIError()
+    return download(services.export_books(body), BOOK_HEADER, BOOK_WIDTHS, '신청도서목록')
 
 
 @admin_api.get('/budget')

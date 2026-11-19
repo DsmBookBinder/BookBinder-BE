@@ -182,6 +182,15 @@ def export_books(body):
     return out
 
 
+def school_order_rows(body):
+    # Only approved, unpurchased books with a positive purchase quantity are orderable.
+    filters = parse_filters({**body, 'status': 'approved'})
+    books = [row['book'] for row in filtered(filters) if row['book'].quantity > 0]
+    if any(book.price is None for book in books):
+        raise APIError('PRICE_REQUIRED', 409, '발주할 도서의 정가를 입력해 주세요.')
+    return [(book.title, book.author, book.publisher, book.price, book.quantity) for book in books]
+
+
 # ── status changes ────────────────────────────────────────────────────
 
 def isbn_list(body, minimum=1):
